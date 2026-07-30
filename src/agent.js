@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { buildInstructions, buildTools } from './prompt.js';
-import { applyPatch, missingFields } from './validate.js';
+import { applyPatch, missingFields, checkField, isEmpty } from './validate.js';
 import { openTrace } from './trace.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -36,6 +36,11 @@ export class FormAgent extends EventEmitter {
     this.form = form;
     this.mode = mode;
     this.data = { ...prefill };
+    // Where each value came from, so a human can spot one the agent invented.
+    // Never used to accept or reject anything — only to show.
+    this.evidence = Object.fromEntries(
+      Object.keys(prefill).map((k) => [k, { source: 'prefill', heard: null }]),
+    );
     this.notes = notes;
     this.sessionId = sessionId;
     this.submitted = false;
@@ -71,6 +76,41 @@ export class FormAgent extends EventEmitter {
     this.#send({ type: 'response.create' });
   }
 
+  /**
+   * A human overrules the agent — someone read the screen, saw a wrong value
+   * and fixed it by hand. Writes straight to the form, then tells the model so
+   * it stops believing the old value. Deliberately does NOT make the agent
+   * speak: correcting a typo should not interrupt the conversation.
+   */
+  correct(field, value) {
+    const spec = this.form.schema.properties?.[field];
+    if (!spec) return { ok: false, error: `unknown field ${field}` };
+
+    const problems = isEmpty(value) ? [] : checkField(field, spec, value);
+    if (problems.length) return { ok: false, error: problems.join('; ') };
+
+    if (isEmpty(value)) { delete this.data[field]; delete this.evidence[field]; }
+    else { this.data[field] = value; this.evidence[field] = { source: 'corrected', heard: null }; }
+
+    this.trace.write({ dir: 'human', type: 'correct', field, value });
+    this.#send({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'system',
+        content: [{
+          type: 'input_text',
+          text: isEmpty(value)
+            ? `A staff member cleared "${field}". Treat it as missing again. Do not mention this correction.`
+            : `A staff member corrected "${field}" to ${JSON.stringify(value)}. This is now the truth; do not save anything different for it and do not mention this correction.`,
+        }],
+      },
+    });
+
+    this.#publish(missingFields(this.form.schema, this.data));
+    return { ok: true };
+  }
+
   /** Stop talking right now (someone started speaking, or the caller hung up). */
   interrupt() {
     if (!this.speaking) return;
@@ -84,6 +124,10 @@ export class FormAgent extends EventEmitter {
   // ---------------------------------------------------------------- internals
 
   #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
+
+  #publish(missing) {
+    this.emit('state', { data: { ...this.data }, missing, evidence: { ...this.evidence } });
+  }
 
   #configure() {
     this.#send({
@@ -178,9 +222,14 @@ export class FormAgent extends EventEmitter {
     const { schema } = this.form;
 
     if (name === 'save_fields') {
-      const { problems, changed } = applyPatch(schema, this.data, args);
+      const { quotes = {}, ...patch } = args;
+      const { problems, changed } = applyPatch(schema, this.data, patch);
+      for (const field of changed) {
+        const heard = typeof quotes[field] === 'string' ? quotes[field].trim() : '';
+        this.evidence[field] = { source: heard ? 'heard' : 'inferred', heard: heard || null };
+      }
       const missing = missingFields(schema, this.data);
-      this.emit('state', { data: { ...this.data }, missing });
+      this.#publish(missing);
       return {
         saved: changed,
         missing,
@@ -195,7 +244,7 @@ export class FormAgent extends EventEmitter {
       try {
         const result = (await this.form.submit?.({ ...this.data })) || {};
         this.submitted = true;
-        this.emit('done', { data: { ...this.data }, result });
+        this.emit('done', { data: { ...this.data }, evidence: { ...this.evidence }, result });
         return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: 'The registration system did not respond.' };

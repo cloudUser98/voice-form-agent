@@ -17,7 +17,7 @@ export function converse(form, lines, { prefill, notes, timeoutMs = 90000, verbo
     function finish(reason) {
       clearTimeout(timer);
       agent.close();
-      resolve({ transcript, data: last.data, missing: last.missing, done, reason });
+      resolve({ transcript, data: last.data, missing: last.missing, evidence: last.evidence || {}, done, reason });
     }
 
     agent.on('transcript', (m) => {
@@ -30,7 +30,10 @@ export function converse(form, lines, { prefill, notes, timeoutMs = 90000, verbo
 
     agent.on('idle', () => {
       if (done) return;
-      const next = script.shift();
+      // A script entry may be a function — that is how a test plays the part of
+      // a staff member correcting a field mid-conversation.
+      let next;
+      while (typeof (next = script.shift()) === 'function') next(agent);
       if (next === undefined) return finish('script-exhausted');
       transcript.push({ role: 'user', text: next });
       if (verbose) console.log(`  👤 ${next}`);

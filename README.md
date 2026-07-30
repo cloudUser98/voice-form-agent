@@ -82,6 +82,61 @@ model asks again.
 Corrections need no special handling: `save_fields` overwrites. For list fields
 the model sends the whole list.
 
+## Catching a value the agent got wrong
+
+Models hallucinate. Rather than trying to prevent it with guards that also
+reject valid answers, the agent makes every value **checkable by a human** and
+**fixable without interrupting the conversation**.
+
+### 1. Every value says what it came from
+
+`save_fields` takes an optional `quotes` map — the words the visitor actually
+used. It is display data: never validated, never used to reject a value. The
+model is told outright that nothing is checked against it, so it has no reason
+to fabricate one. Each field ends up tagged:
+
+| source | meaning |
+|---|---|
+| `heard` | the visitor said it, and the quote is there to prove it |
+| `inferred` | the agent worked it out — **check this one** |
+| `prefill` | came from outside; nobody said it |
+| `corrected` | a human overruled the agent |
+
+```
+visitantes   = ["Ana Ruiz"]   [heard] “Soy Ana Ruiz”
+procedencia  = "Bimbo"        [heard] “vengo de Bimbo”
+anfitrion    = "Laura Mendoza"[inferred] (no quote)     ← nobody said "Mendoza"
+```
+
+The browser client renders this as a live table; amber rows are the ones worth
+reading. This is the same information the old quote-grounding harness collected,
+used the opposite way: **shown to a person instead of enforced against the
+model.** No valid answer ever gets rejected.
+
+### 2. Anyone can overrule it, mid-conversation
+
+```js
+agent.correct('procedencia', 'Grupo Lala');   // or {type:'correct'} over the socket
+```
+
+Writes straight to the form, marks it `corrected`, and quietly tells the model
+the new value is the truth. It does **not** make the agent speak, so fixing a
+misheard name never interrupts anything. Observed:
+
+```
+👤 Soy Ana Ruiz y vengo de Bimbo.
+   >>> correct('procedencia', 'Grupo Lala')
+🤖 Te registraste como visitante de Grupo Lala.
+   Y seguimos: ¿cuál es el motivo de tu visita?
+```
+
+It adopted the new value, never mentioned the correction, and carried on with
+the question it was already asking. Invalid corrections are refused against the
+schema (`{ok:false, error:'procedencia: too short'}`), so the escape hatch can't
+put junk in the form either.
+
+In the browser client, click any value to edit it.
+
 ## Prefilled context
 
 Anything that knows something before the conversation starts — a face detector,
@@ -109,6 +164,7 @@ are JSON.
 |---|---|
 | → | `{type:'start', form, prefill?, notes?, mode?}` |
 | → | binary audio · `{type:'text', text}` · `{type:'interrupt'}` |
+| → | `{type:'correct', field, value}` — human overrules a value |
 | ← | binary audio |
 | ← | `{type:'ready'\|'transcript'\|'state'\|'idle'\|'interrupted'\|'done'\|'error'}` |
 

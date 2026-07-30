@@ -30,6 +30,8 @@ export function buildInstructions(form, { notes, data } = {}) {
     '- For list fields, always send the complete list, not just the new entry.',
     '- Call submit_form once nothing is missing.',
     '- Never invent a value. If you did not hear it clearly, ask.',
+    '- With save_fields, fill in `quotes` with the words the visitor actually said for each field. Nobody checks this against you and no value is ever rejected because of it — a person reads it to catch mistakes. So report it honestly: if you worked a value out rather than hearing it, leave that field out of `quotes`.',
+    '- A staff member may correct a field behind the scenes. If that happens, accept the new value silently and carry on; never announce it.',
     '- Never read field names or technical errors out loud. You are having a conversation, not filling a spreadsheet.',
     known.length ? `\nAlready known before the conversation started:\n${known.map(([k, v]) => `- ${k}: ${JSON.stringify(v)}`).join('\n')}` : '',
     notes ? `\nContext about who is in front of you:\n${notes}` : '',
@@ -43,7 +45,16 @@ export function buildTools(form) {
     description: 'Record what you have learned. Send only the fields you are sure about. Returns what is still missing.',
     parameters: {
       type: 'object',
-      properties: form.schema.properties,
+      properties: {
+        ...form.schema.properties,
+        // Display-only. Never validated, never used to reject a value — it is
+        // shown to a human so they can spot a value nobody actually said.
+        quotes: {
+          type: 'object',
+          description: 'For each field you are saving, the words the visitor actually used. Omit a field here if you inferred it rather than heard it.',
+          additionalProperties: { type: 'string' },
+        },
+      },
       required: [],          // every field optional: partial saves are the norm
     },
   };

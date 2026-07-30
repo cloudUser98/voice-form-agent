@@ -5,7 +5,16 @@
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
   button { font: inherit; padding: .5rem 1rem; }
   #log p { margin: .4rem 0; } .user { color: #444; } .agent { color: #0a5; }
-  pre { background: #f4f4f4; padding: .75rem; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; color: #888; font-weight: 600; }
+  .val { cursor: pointer; font-weight: 600; } .val:hover { background: #ffe; }
+  .quote { color: #666; font-style: italic; }
+  .tag { font-size: .72rem; padding: .1rem .4rem; border-radius: 3px; white-space: nowrap; }
+  .heard { background: #dff5e3; color: #096; }
+  .inferred, .prefill { background: #ffe9c7; color: #a60; }
+  .corrected { background: #e2e8ff; color: #33a; }
+  .missing td { color: #bbb; }
 </style>
 
 <h1>voice-form-agent</h1>
@@ -15,7 +24,15 @@
   <span id="status"></span>
 </p>
 <div id="log"></div>
-<pre id="state">{}</pre>
+
+<table>
+  <thead><tr><th>Field</th><th>Value</th><th>Based on</th><th></th></tr></thead>
+  <tbody id="fields"></tbody>
+</table>
+<p id="hint" style="color:#888;font-size:.85rem">
+  Amber means the agent worked the value out rather than hearing it — check those.
+  Click any value to correct it; the conversation carries on uninterrupted.
+</p>
 
 <script type="module">
 // Minimal browser client: microphone in, speech out. All the agent logic lives
@@ -28,6 +45,52 @@ const log = (cls, text) => {
   p.textContent = (cls === 'user' ? '👤 ' : '🤖 ') + text;
   $('log').append(p);
 };
+
+// The correction surface: every field, what it was based on, and how it got
+// there. A value the agent invented shows up amber with no quote behind it.
+function render({ data = {}, missing = [], evidence = {} }, ws) {
+  const names = [...new Set([...Object.keys(data), ...missing])];
+  $('fields').replaceChildren(...names.map((name) => {
+    const row = document.createElement('tr');
+    const has = data[name] !== undefined;
+    if (!has) row.className = 'missing';
+
+    const ev = evidence[name] || {};
+    const shown = Array.isArray(data[name]) ? data[name].join(', ') : (data[name] ?? '—');
+
+    row.innerHTML = `<td>${name}</td>`;
+    const cell = document.createElement('td');
+    cell.className = 'val';
+    cell.textContent = shown;
+    cell.title = 'Click to correct';
+    cell.onclick = () => {
+      const input = document.createElement('input');
+      input.value = has ? shown : '';
+      input.style.width = '100%';
+      const commit = () => {
+        const raw = input.value.trim();
+        // Lists are typed comma-separated; the schema decides which is which.
+        const value = Array.isArray(data[name]) ? raw.split(',').map((s) => s.trim()).filter(Boolean) : raw;
+        ws.send(JSON.stringify({ type: 'correct', field: name, value }));
+      };
+      input.onkeydown = (k) => { if (k.key === 'Enter') commit(); if (k.key === 'Escape') render({ data, missing, evidence }, ws); };
+      input.onblur = commit;
+      cell.replaceChildren(input);
+      input.focus();
+    };
+    row.append(cell);
+
+    const q = document.createElement('td');
+    q.className = 'quote';
+    q.textContent = ev.heard ? `“${ev.heard}”` : (has ? '— nothing quoted —' : '');
+    row.append(q);
+
+    const tag = document.createElement('td');
+    if (has) tag.innerHTML = `<span class="tag ${ev.source || 'inferred'}">${ev.source || 'inferred'}</span>`;
+    row.append(tag);
+    return row;
+  }));
+}
 
 $('go').onclick = async () => {
   $('go').disabled = true;
@@ -84,9 +147,9 @@ $('go').onclick = async () => {
     const e = JSON.parse(ev.data);
     if (e.type === 'ready') $('status').textContent = 'listening';
     if (e.type === 'transcript') log(e.role, e.text);
-    if (e.type === 'state') $('state').textContent = JSON.stringify(e.data, null, 2) + `\n\nmissing: ${e.missing.join(', ') || 'nothing'}`;
+    if (e.type === 'state') render(e, ws);
     if (e.type === 'interrupted') stopPlayback();       // visitor started talking
-    if (e.type === 'done') { $('status').textContent = 'done'; $('state').textContent = JSON.stringify(e, null, 2); }
+    if (e.type === 'done') { $('status').textContent = `done · ${JSON.stringify(e.result)}`; render(e, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
   };
 };

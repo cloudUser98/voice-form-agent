@@ -5,6 +5,7 @@
 //
 //   client -> {type:'start', form, prefill?, notes?, mode?}
 //   client -> {type:'text', text}          typed input instead of speech
+//   client -> {type:'correct', field, value}   human overrules the agent
 //   client -> {type:'interrupt'}
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'interrupted'|'done'|'error'}
 import 'dotenv/config';
@@ -66,6 +67,10 @@ wss.on('connection', (ws) => {
     if (!agent) return say({ type: 'error', error: 'send {type:"start"} first' });
     if (msg.type === 'text') return agent.sendText(msg.text);
     if (msg.type === 'interrupt') return agent.interrupt();
+    if (msg.type === 'correct') {
+      const r = agent.correct(msg.field, msg.value);
+      return r.ok || say({ type: 'error', error: r.error });
+    }
     say({ type: 'error', error: `unknown message ${msg.type}` });
   });
 

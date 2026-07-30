@@ -46,6 +46,42 @@ describe('visit form', () => {
   });
 });
 
+describe('catching and fixing a wrong value', () => {
+  test('every saved value carries the words it came from', live, async () => {
+    const r = await converse(visit, [
+      'Soy Ana Ruiz, vengo de Bimbo a dejar unos papeles con Carlos Nunez.',
+    ]);
+    for (const field of Object.keys(r.data)) {
+      const ev = r.evidence[field];
+      assert.ok(ev, `${field} has no provenance`);
+      assert.ok(['heard', 'inferred', 'prefill', 'corrected'].includes(ev.source));
+      if (ev.source === 'heard') assert.ok(ev.heard?.length, `${field} claims 'heard' with no quote`);
+    }
+    // Anything genuinely spoken should be quoted, so a human can check it.
+    assert.equal(r.evidence.procedencia.source, 'heard');
+    assert.match(r.evidence.procedencia.heard, /Bimbo/i);
+  });
+
+  test('a staff correction overrules the agent without derailing it', live, async () => {
+    const r = await converse(visit, [
+      'Soy Ana Ruiz y vengo de Bimbo.',
+      (agent) => {
+        assert.deepEqual(agent.correct('procedencia', 'X'), { ok: false, error: 'procedencia: too short' });
+        assert.equal(agent.correct('nope', 'y').ok, false);
+        assert.deepEqual(agent.correct('procedencia', 'Grupo Lala'), { ok: true });
+      },
+      'Oye, ¿de qué empresa me registraste?',
+    ]);
+    assert.equal(r.data.procedencia, 'Grupo Lala');
+    assert.equal(r.evidence.procedencia.source, 'corrected');
+
+    // It should adopt the new value and not narrate the correction.
+    const said = r.transcript.filter((m) => m.role === 'agent').map((m) => m.text).join(' ');
+    assert.match(said, /Lala/i);
+    assert.doesNotMatch(said, /corrigi|correcci[óo]n|compañer|sistema me indic/i);
+  });
+});
+
 describe('hotel form — same engine, different questions', () => {
   test('fills enums and numbers', live, async () => {
     const r = await converse(hotel, [
