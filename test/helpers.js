@@ -5,9 +5,9 @@ import { FormAgent } from '../src/agent.js';
  * the transcript plus the final form state. This is the whole test strategy:
  * no mocks, no unit-testing a state machine that no longer exists.
  */
-export function converse(form, lines, { prefill, notes, timeoutMs = 90000, verbose } = {}) {
+export function converse(form, lines, { prefill, notes, label, timeoutMs = 90000, verbose } = {}) {
   return new Promise((resolve, reject) => {
-    const agent = new FormAgent({ form, prefill, notes, mode: 'text' });
+    const agent = new FormAgent({ form, prefill, notes, label, mode: 'text' });
     const script = [...lines];
     const transcript = [];
     let last = { data: prefill ? { ...prefill } : {}, missing: [] };

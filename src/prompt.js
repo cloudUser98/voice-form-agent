@@ -1,6 +1,11 @@
-// Turns a form definition into session instructions. The whole "what to ask
-// next" logic lives in the tool results, not here — these instructions are
-// static for the life of a session.
+// Turns a form definition into session instructions.
+//
+// Two channels, deliberately separated:
+//   - the BOARD (here) carries current state and what to do next. It is
+//     rebuilt and pushed with session.update whenever anything changes, so
+//     there is exactly one copy and it is never stale.
+//   - tool results (in agent.js) carry facts about an action that just
+//     happened. They report; they do not instruct.
 
 const describe = (name, spec, required) => {
   const bits = [spec.type];
@@ -9,13 +14,53 @@ const describe = (name, spec, required) => {
   return `- ${name} (${bits.join('; ')})${spec.description ? ` — ${spec.description}` : ''}`;
 };
 
-export function buildInstructions(form, { notes, data } = {}) {
+/**
+ * What the agent should do once every required field is filled. Driven purely
+ * by the form's `onComplete`, so the same engine reads a record back for one
+ * form and submits silently for another.
+ */
+export function nextAction(form, { label, state }) {
+  const rule = form.onComplete;
+
+  if (rule === undefined || rule === null || rule === false) {
+    return 'Call submit_form now.';
+  }
+  if (rule === 'read-back') {
+    const who = label ? ` to ${label}` : '';
+    return `If you have not already done so, repeat the recorded details back${who} in ONE natural sentence and ask them to confirm. Once they have confirmed, call submit_form. Do not read the details back twice.`;
+  }
+  if (typeof rule === 'function') {
+    return String(rule(state.data, { label }) || '').trim();
+  }
+  return String(rule).trim();
+}
+
+/** The live status block. One entry today, many once the agent runs several. */
+export function buildBoard(form, entries) {
+  if (!entries.length) return '=== OPEN FORMS ===\n(none yet)';
+
+  const lines = entries.map(({ id, label, state }) => {
+    const head = [id, label || '(unnamed)'].filter(Boolean).join(' ');
+    const filled = Object.entries(state.data)
+      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+      .join(', ') || '(nothing yet)';
+    const missing = state.missing();
+
+    const tail = missing.length
+      ? `   missing: ${missing.join(', ')}`
+      : `   COMPLETE ▸ NEXT: ${nextAction(form, { label, state })}`;
+
+    return `${head}\n   filled: ${filled}\n${tail}`;
+  });
+
+  return `=== OPEN FORMS ===\n${lines.join('\n')}`;
+}
+
+export function buildInstructions(form, { notes, entries = [] } = {}) {
   const { properties = {}, required = [] } = form.schema;
   const fields = Object.entries(properties)
     .map(([name, spec]) => describe(name, spec, required.includes(name)))
     .join('\n');
-
-  const known = Object.entries(data || {}).filter(([, v]) => v !== undefined && v !== '');
 
   return [
     form.persona.trim(),
@@ -25,16 +70,17 @@ export function buildInstructions(form, { notes, data } = {}) {
     '',
     'How to work:',
     '- Call save_fields the moment you learn something, even partially. You may save several fields at once.',
-    '- save_fields tells you what is still missing. Ask for that, one thing at a time, in your own words.',
+    '- Ask for whatever the status block below says is missing, one thing at a time, in your own words.',
     '- If someone corrects themselves, call save_fields again with the new value. It replaces the old one.',
     '- For list fields, always send the complete list, not just the new entry.',
-    '- Call submit_form once nothing is missing.',
     '- Never invent a value. If you did not hear it clearly, ask.',
     '- With save_fields, fill in `quotes` with the words the visitor actually said for each field. Nobody checks this against you and no value is ever rejected because of it — a person reads it to catch mistakes. So report it honestly: if you worked a value out rather than hearing it, leave that field out of `quotes`.',
     '- A staff member may correct a field behind the scenes. If that happens, accept the new value silently and carry on; never announce it.',
     '- Never read field names or technical errors out loud. You are having a conversation, not filling a spreadsheet.',
-    known.length ? `\nAlready known before the conversation started:\n${known.map(([k, v]) => `- ${k}: ${JSON.stringify(v)}`).join('\n')}` : '',
     notes ? `\nContext about who is in front of you:\n${notes}` : '',
+    '',
+    'The block below is rewritten as things change. Trust it over your memory:',
+    buildBoard(form, entries),
   ].filter(Boolean).join('\n');
 }
 
@@ -42,7 +88,7 @@ export function buildTools(form) {
   const save = {
     type: 'function',
     name: 'save_fields',
-    description: 'Record what you have learned. Send only the fields you are sure about. Returns what is still missing.',
+    description: 'Record what you have learned. Send only the fields you are sure about.',
     parameters: {
       type: 'object',
       properties: {

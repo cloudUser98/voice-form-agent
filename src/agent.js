@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { buildInstructions, buildTools } from './prompt.js';
-import { applyPatch, missingFields, checkField, isEmpty } from './validate.js';
+import { FormState } from './form-state.js';
 import { openTrace } from './trace.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -23,6 +23,7 @@ export class FormAgent extends EventEmitter {
     form,
     prefill = {},
     notes = '',
+    label = '',                         // who this form is for, if known
     mode = 'audio',                     // 'audio' | 'text'
     apiKey = process.env.OPENAI_API_KEY,
     model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
@@ -35,12 +36,8 @@ export class FormAgent extends EventEmitter {
 
     this.form = form;
     this.mode = mode;
-    this.data = { ...prefill };
-    // Where each value came from, so a human can spot one the agent invented.
-    // Never used to accept or reject anything — only to show.
-    this.evidence = Object.fromEntries(
-      Object.keys(prefill).map((k) => [k, { source: 'prefill', heard: null }]),
-    );
+    this.state = new FormState(form.schema, { prefill, label });
+    this.label = label;
     this.notes = notes;
     this.sessionId = sessionId;
     this.submitted = false;
@@ -83,16 +80,14 @@ export class FormAgent extends EventEmitter {
    * speak: correcting a typo should not interrupt the conversation.
    */
   correct(field, value) {
-    const spec = this.form.schema.properties?.[field];
-    if (!spec) return { ok: false, error: `unknown field ${field}` };
+    const outcome = this.state.correct(field, value);
+    if (!outcome.ok) return outcome;
 
-    const problems = isEmpty(value) ? [] : checkField(field, spec, value);
-    if (problems.length) return { ok: false, error: problems.join('; ') };
-
-    if (isEmpty(value)) { delete this.data[field]; delete this.evidence[field]; }
-    else { this.data[field] = value; this.evidence[field] = { source: 'corrected', heard: null }; }
-
+    const cleared = this.state.data[field] === undefined;
     this.trace.write({ dir: 'human', type: 'correct', field, value });
+
+    // A correction is a point-in-time event, so it goes in the history as a
+    // system item. The resulting *state* is carried by the board instead.
     this.#send({
       type: 'conversation.item.create',
       item: {
@@ -100,14 +95,14 @@ export class FormAgent extends EventEmitter {
         role: 'system',
         content: [{
           type: 'input_text',
-          text: isEmpty(value)
+          text: cleared
             ? `A staff member cleared "${field}". Treat it as missing again. Do not mention this correction.`
             : `A staff member corrected "${field}" to ${JSON.stringify(value)}. This is now the truth; do not save anything different for it and do not mention this correction.`,
         }],
       },
     });
 
-    this.#publish(missingFields(this.form.schema, this.data));
+    this.#publish();
     return { ok: true };
   }
 
@@ -119,14 +114,49 @@ export class FormAgent extends EventEmitter {
     this.emit('interrupted');
   }
 
-  close() { this.ws?.close(); }
+  close() { clearTimeout(this.boardTimer); this.ws?.close(); }
 
   // ---------------------------------------------------------------- internals
 
   #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
 
-  #publish(missing) {
-    this.emit('state', { data: { ...this.data }, missing, evidence: { ...this.evidence } });
+  #publish() {
+    this.emit('state', this.state.snapshot());
+    this.#scheduleBoard();
+  }
+
+  #entries() { return [{ id: '', label: this.label, state: this.state }]; }
+
+  #instructions() {
+    return buildInstructions(this.form, { notes: this.notes, entries: this.#entries() });
+  }
+
+  /**
+   * Rewrite the status block the model reads. Pushing it costs a round trip, so
+   * out-of-band changes (a staff correction) are debounced and never land in
+   * the middle of a response.
+   */
+  #scheduleBoard() {
+    clearTimeout(this.boardTimer);
+    this.boardTimer = setTimeout(() => {
+      if (this.speaking) return this.#scheduleBoard();
+      this.#flushBoard();
+    }, 250);
+  }
+
+  /**
+   * Push it right now. Used after tool calls, where the board MUST be current
+   * before the model gets the floor back — that is the exact turn where a form
+   * has just become complete.
+   */
+  #flushBoard() {
+    clearTimeout(this.boardTimer);
+    this.boardTimer = null;
+    if (!this.ready) return;
+    this.#send({
+      type: 'session.update',
+      session: { type: 'realtime', instructions: this.#instructions() },
+    });
   }
 
   #configure() {
@@ -146,7 +176,7 @@ export class FormAgent extends EventEmitter {
           },
           output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
         },
-        instructions: buildInstructions(this.form, { notes: this.notes, data: this.data }),
+        instructions: this.#instructions(),
         tools: buildTools(this.form),
         tool_choice: 'auto',
       },
@@ -214,37 +244,35 @@ export class FormAgent extends EventEmitter {
       });
     }
 
+    // The board must be current BEFORE the model speaks again: this is the
+    // turn where a form may have just become complete.
+    this.#flushBoard();
+
     // The model is waiting on those results — give it the floor back.
     if (!this.submitted) this.#send({ type: 'response.create' });
   }
 
   async #runTool(name, args) {
-    const { schema } = this.form;
-
+    // Tool results report what happened. What to do next lives in the board.
     if (name === 'save_fields') {
       const { quotes = {}, ...patch } = args;
-      const { problems, changed } = applyPatch(schema, this.data, patch);
-      for (const field of changed) {
-        const heard = typeof quotes[field] === 'string' ? quotes[field].trim() : '';
-        this.evidence[field] = { source: heard ? 'heard' : 'inferred', heard: heard || null };
-      }
-      const missing = missingFields(schema, this.data);
-      this.#publish(missing);
+      const { problems, changed } = this.state.save(patch, quotes);
+      this.#publish();
       return {
         saved: changed,
-        missing,
+        missing: this.state.missing(),
         ...(problems.length ? { rejected: problems } : {}),
-        ...(missing.length ? {} : { hint: 'Everything required is filled. Call submit_form.' }),
       };
     }
 
     if (name === 'submit_form') {
-      const missing = missingFields(schema, this.data);
-      if (missing.length) return { ok: false, missing, hint: 'Ask for these before submitting.' };
+      const missing = this.state.missing();
+      if (missing.length) return { ok: false, missing };
       try {
-        const result = (await this.form.submit?.({ ...this.data })) || {};
+        const snapshot = this.state.snapshot();
+        const result = (await this.form.submit?.({ ...snapshot.data })) || {};
         this.submitted = true;
-        this.emit('done', { data: { ...this.data }, evidence: { ...this.evidence }, result });
+        this.emit('done', { ...snapshot, result });
         return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: 'The registration system did not respond.' };
@@ -253,7 +281,7 @@ export class FormAgent extends EventEmitter {
 
     const custom = (this.form.tools || []).find((t) => t.definition.name === name);
     if (custom) {
-      try { return await custom.run(args, { data: this.data }); }
+      try { return await custom.run(args, { data: this.state.data }); }
       catch (err) { return { ok: false, error: String(err.message || err) }; }
     }
 

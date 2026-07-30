@@ -11,7 +11,9 @@ import { converse } from './helpers.js';
 const live = { skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
 
 describe('visit form', () => {
-  test('collects several visitors in one conversation', live, async () => {
+  // Superseded by Stage B: one form is now one person, so two visitors means
+  // two registrations. Re-enable as a multi-registration test then.
+  test('collects several visitors in one conversation', { ...live, skip: 'rewritten in Stage B' }, async () => {
     const r = await converse(visit, [
       'Somos Victor Delgado y Ana Ruiz, venimos de FAMSA.',
       'Tenemos junta con Laura Mendoza.',
@@ -37,12 +39,13 @@ describe('visit form', () => {
     const r = await converse(visit, [
       'Sí, soy yo. Vengo de FAMSA a ver a Laura Mendoza por la junta mensual.',
     ], {
-      prefill: { visitantes: ['Víctor Delgado'] },
+      prefill: { visitante: 'Víctor Delgado' },
+      label: 'Víctor Delgado',
       notes: 'La cámara reconoció a Víctor Delgado, que ya ha visitado antes.',
     });
     const opening = r.transcript.find((m) => m.role === 'agent')?.text || '';
     assert.match(opening, /V[íi]ctor/i, 'should greet him by name');
-    assert.deepEqual(r.data.visitantes, ['Víctor Delgado']);
+    assert.equal(r.data.visitante, 'Víctor Delgado');
   });
 });
 

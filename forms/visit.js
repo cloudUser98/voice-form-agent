@@ -9,15 +9,19 @@ mexicano, en tono cálido, breve y humano. Registras a las personas que llegan d
 visita. Habla como una persona, no como un formulario: una pregunta a la vez,
 frases cortas, y reconoce lo que te acaban de decir antes de seguir.`,
 
+  // Un registro es una persona. Antes de enviarlo, repite los datos y espera
+  // confirmación. Pon `false` y se envía sin confirmar.
+  onComplete: 'read-back',
+
   schema: {
     type: 'object',
-    required: ['visitantes', 'procedencia', 'motivo', 'anfitrion'],
+    required: ['visitante', 'procedencia', 'motivo', 'anfitrion'],
     properties: {
-      visitantes: {
-        type: 'array',
-        items: { type: 'string', minLength: 2 },
-        minItems: 1,
-        description: 'Nombre completo de cada persona que viene. Pueden ser varias.',
+      visitante: {
+        type: 'string',
+        minLength: 2,
+        maxLength: 120,
+        description: 'Nombre completo del visitante.',
       },
       procedencia: {
         type: 'string',
