@@ -97,8 +97,6 @@ $('go').onclick = async () => {
   $('status').textContent = 'connecting…';
 
   const ctx = new AudioContext({ sampleRate: RATE });
-  const ws = new WebSocket(`ws://${location.hostname}:8787`);
-  ws.binaryType = 'arraybuffer';
 
   // ---- playback: schedule chunks back to back on one moving cursor --------
   let cursor = 0;
@@ -130,6 +128,15 @@ $('go').onclick = async () => {
   });
   const tap = new AudioWorkletNode(ctx, 'tap');
   ctx.createMediaStreamSource(stream).connect(tap);
+
+  // ---- protocol ----------------------------------------------------------
+  // The socket is opened only now, after every await above. Opening it earlier
+  // races the microphone permission prompt: the socket connects first, onopen
+  // is assigned too late to ever fire, and the session never starts.
+  const host = location.hostname || 'localhost';   // also works from file://
+  const ws = new WebSocket(`ws://${host}:8787`);
+  ws.binaryType = 'arraybuffer';
+
   tap.port.onmessage = (e) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const f32 = e.data;
@@ -138,8 +145,8 @@ $('go').onclick = async () => {
     ws.send(pcm.buffer);
   };
 
-  // ---- protocol ----------------------------------------------------------
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'start', form: $('form').value }));
+  ws.onopen = () => { $('status').textContent = 'starting…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value })); };
+  ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
   ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
 
   ws.onmessage = (ev) => {
