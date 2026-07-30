@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>voice-form-agent</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+  button { font: inherit; padding: .5rem 1rem; }
+  #log p { margin: .4rem 0; } .user { color: #444; } .agent { color: #0a5; }
+  pre { background: #f4f4f4; padding: .75rem; border-radius: 4px; }
+</style>
+
+<h1>voice-form-agent</h1>
+<p>
+  <select id="form"><option>visit</option><option>hotel</option></select>
+  <button id="go">Start talking</button>
+  <span id="status"></span>
+</p>
+<div id="log"></div>
+<pre id="state">{}</pre>
+
+<script type="module">
+// Minimal browser client: microphone in, speech out. All the agent logic lives
+// on the server — this file only moves PCM around.
+const RATE = 24000;
+const $ = (id) => document.getElementById(id);
+const log = (cls, text) => {
+  const p = document.createElement('p');
+  p.className = cls;
+  p.textContent = (cls === 'user' ? '👤 ' : '🤖 ') + text;
+  $('log').append(p);
+};
+
+$('go').onclick = async () => {
+  $('go').disabled = true;
+  $('status').textContent = 'connecting…';
+
+  const ctx = new AudioContext({ sampleRate: RATE });
+  const ws = new WebSocket(`ws://${location.hostname}:8787`);
+  ws.binaryType = 'arraybuffer';
+
+  // ---- playback: schedule chunks back to back on one moving cursor --------
+  let cursor = 0;
+  let sources = [];
+  const play = (buf) => {
+    const pcm = new Int16Array(buf);
+    const audio = ctx.createBuffer(1, pcm.length, RATE);
+    const ch = audio.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = ctx.createBufferSource();
+    src.buffer = audio;
+    src.connect(ctx.destination);
+    cursor = Math.max(cursor, ctx.currentTime);
+    src.start(cursor);
+    cursor += audio.duration;
+    sources.push(src);
+    src.onended = () => { sources = sources.filter((s) => s !== src); };
+  };
+  const stopPlayback = () => { sources.forEach((s) => { try { s.stop(); } catch {} }); sources = []; cursor = 0; };
+
+  // ---- microphone --------------------------------------------------------
+  const worklet = `class P extends AudioWorkletProcessor{
+    process(inputs){ const c = inputs[0][0]; if (c) this.port.postMessage(c.slice()); return true; }
+  } registerProcessor('tap', P)`;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: 'application/javascript' })));
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const tap = new AudioWorkletNode(ctx, 'tap');
+  ctx.createMediaStreamSource(stream).connect(tap);
+  tap.port.onmessage = (e) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const f32 = e.data;
+    const pcm = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
+    ws.send(pcm.buffer);
+  };
+
+  // ---- protocol ----------------------------------------------------------
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'start', form: $('form').value }));
+  ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
+
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) return play(ev.data);
+    const e = JSON.parse(ev.data);
+    if (e.type === 'ready') $('status').textContent = 'listening';
+    if (e.type === 'transcript') log(e.role, e.text);
+    if (e.type === 'state') $('state').textContent = JSON.stringify(e.data, null, 2) + `\n\nmissing: ${e.missing.join(', ') || 'nothing'}`;
+    if (e.type === 'interrupted') stopPlayback();       // visitor started talking
+    if (e.type === 'done') { $('status').textContent = 'done'; $('state').textContent = JSON.stringify(e, null, 2); }
+    if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
+  };
+};
+</script>

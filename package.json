@@ -1,0 +1,17 @@
+{
+  "name": "voice-form-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Headless realtime voice agent that fills any JSON Schema form. Transport-agnostic: browsers, CLIs, tests.",
+  "scripts": {
+    "serve": "node src/server.js",
+    "cli": "node clients/cli.js",
+    "test": "node --test test/",
+    "probe": "node test/probe.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "ws": "^8.18.3"
+  },
+  "engines": { "node": ">=20.18" }
+}

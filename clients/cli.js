@@ -1,0 +1,45 @@
+// Terminal client. Proof the agent is transport-agnostic, and the fastest dev
+// loop there is: type at the agent, watch the form fill.
+//
+//   node clients/cli.js visit
+//   node clients/cli.js hotel --notes "La cámara reconoció a Víctor Delgado."
+import 'dotenv/config';
+import readline from 'node:readline';
+import WebSocket from 'ws';
+
+const args = process.argv.slice(2);
+const form = args[0] || 'visit';
+const notes = args.includes('--notes') ? args[args.indexOf('--notes') + 1] : '';
+const url = process.env.AGENT_URL || 'ws://localhost:8787';
+
+const ws = new WebSocket(url);
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '👤 ' });
+
+// Lines are queued and released one per agent turn, so piping a script in
+// works the same as typing interactively.
+const queue = [];
+let waiting = false;
+
+function pump() {
+  if (!waiting || !queue.length) return;
+  waiting = false;
+  ws.send(JSON.stringify({ type: 'text', text: queue.shift() }));
+}
+
+ws.on('open', () => ws.send(JSON.stringify({ type: 'start', form, notes, mode: 'text' })));
+
+ws.on('message', (raw, isBinary) => {
+  if (isBinary) return;                       // a real client would play this
+  const e = JSON.parse(raw);
+  if (e.type === 'ready') console.log(`— session ${e.session} · trace ${e.trace}\n`);
+  if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
+  if (e.type === 'state') console.log(`   [${Object.keys(e.data).length} filled · missing: ${e.missing.join(', ') || 'nothing'}]`);
+  if (e.type === 'done') { console.log(`✅ ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`); ws.close(); }
+  if (e.type === 'error') console.error(`⚠️  ${e.error}`);
+  if (e.type === 'idle') { waiting = true; queue.length ? pump() : rl.prompt(); }
+});
+
+rl.on('line', (line) => { if (line.trim()) { queue.push(line); pump(); } });
+rl.on('close', () => { if (!queue.length && !waiting) ws.close(); });
+ws.on('close', () => { rl.close(); process.exit(0); });
+ws.on('error', (e) => { console.error(`cannot reach ${url}: ${e.message}`); process.exit(1); });
