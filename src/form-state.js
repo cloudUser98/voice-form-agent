@@ -22,13 +22,20 @@ export class FormState {
   /**
    * Record what the agent learned. `quotes` maps a field to the words the
    * visitor actually used; it is display data only and never affects whether a
-   * value is accepted.
+   * value is accepted. `addressing` names the person the agent was talking to
+   * when the value did NOT belong to them.
    */
-  save(patch, quotes = {}) {
+  save(patch, quotes = {}, { addressing = null } = {}) {
     const { problems, changed } = applyPatch(this.schema, this.data, patch);
     for (const field of changed) {
       const heard = typeof quotes[field] === 'string' ? quotes[field].trim() : '';
-      this.evidence[field] = { source: heard ? 'heard' : 'inferred', heard: heard || null };
+      this.evidence[field] = {
+        source: heard ? 'heard' : 'inferred',
+        heard: heard || null,
+        // Saved onto this form while the agent was talking to someone else.
+        // Never rejected — shown, so a person can spot a mis-attribution.
+        ...(addressing ? { cross: addressing } : {}),
+      };
     }
     return { changed, problems };
   }

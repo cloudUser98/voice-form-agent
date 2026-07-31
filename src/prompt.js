@@ -40,8 +40,8 @@ export function nextAction(form, { label, state }) {
 export function buildBoard(form, entries) {
   if (!entries.length) return '=== OPEN FORMS ===\n(none yet)';
 
-  const lines = entries.map(({ id, label, state, status, result }) => {
-    const head = [id, label || '(unnamed)'].filter(Boolean).join(' ');
+  const lines = entries.map(({ id, label, state, status, result, focused }) => {
+    const head = `${focused ? '▶ ' : '  '}${[id, label || '(unnamed)'].filter(Boolean).join(' ')}`;
     const filled = Object.entries(state.data)
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
       .join(', ') || '(nothing yet)';
@@ -62,7 +62,25 @@ export function buildBoard(form, entries) {
     return `${head}\n   filled: ${filled}\n${tail}`;
   });
 
-  return `=== OPEN FORMS ===\n${lines.join('\n')}`;
+  return `=== OPEN FORMS ===\n${lines.join('\n')}${sharedGaps(entries)}`;
+}
+
+/**
+ * Fields that every open registration is still missing. Pure computation, but
+ * it is what lets the agent notice it can ask one question for the whole room
+ * instead of working through people one at a time.
+ */
+function sharedGaps(entries) {
+  const open = entries.filter((e) => e.status === 'open');
+  if (open.length < 2) return '';
+
+  const sets = open.map((e) => new Set(e.state.missing()));
+  const shared = [...sets[0]].filter((f) => sets.every((s) => s.has(f)));
+  if (!shared.length) return '';
+
+  const who = open.map((e) => e.id).join(' and ');
+  return `\n\n  ${who} ALL still need: ${shared.join(', ')}`
+       + '\n  → you may ask the group once instead of repeating yourself.';
 }
 
 export function buildInstructions(form, { notes, entries = [] } = {}) {
@@ -83,7 +101,10 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
     '- You may have SEVERAL registrations open at once, one per person. Every save_fields, submit_form and close_registration needs its `registration` id — read it off the status block below. If you lose track of who is who, call open_registrations.',
     '- Address a person by name before asking them something, so everyone knows who you are talking to.',
     '- An answer belongs to the person you last addressed, unless the speaker says who they are.',
-    '- Work on ONE registration at a time. If someone new arrives, greet them warmly straight away and call start_registration so they appear on the board — but do not ask them questions until the registration in progress is submitted or closed.',
+    '- If someone new arrives, greet them warmly straight away and call start_registration so they appear on the board.',
+    '- You decide who to ask what, and in what order — whatever keeps the conversation short and natural. Call focus when you turn your attention to a different person, so everyone can see who you are addressing.',
+    '- When several people are missing the SAME field, ask the group once instead of repeating yourself, then save the answer to each registration it applies to with a separate save_fields call.',
+    '- If an answer could belong to more than one person, ask who it was for before saving it. But if you just addressed someone by name, the answer is theirs — do not ask.',
     '- If someone corrects themselves, call save_fields again with the new value. It replaces the old one.',
     '- For list fields, always send the complete list, not just the new entry.',
     '- Never invent a value. If you did not hear it clearly, ask.',
@@ -168,5 +189,16 @@ export function buildTools(form) {
     },
   };
 
-  return [start, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
+  const focus = {
+    type: 'function',
+    name: 'focus',
+    description: 'Say who you are now talking to. Call it whenever you turn your attention to a different person.',
+    parameters: {
+      type: 'object',
+      properties: { registration: { type: 'string', description: 'The registration of the person you are addressing.' } },
+      required: ['registration'],
+    },
+  };
+
+  return [start, focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
 }

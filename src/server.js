@@ -58,6 +58,7 @@ wss.on('connection', (ws) => {
       agent.on('state', (s) => say({ type: 'state', ...s }));
       agent.on('idle', () => say({ type: 'idle' }));
       agent.on('speaking', (on) => say({ type: 'speaking', on }));
+      agent.on('focus', (f) => say({ type: 'focus', ...f }));
       if (msg.debug) agent.on('debug', (entry) => say({ type: 'debug', entry }));
       agent.on('done', (d) => say({ type: 'done', ...d }));
       agent.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));

@@ -15,7 +15,8 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  * integration surface.
  *
  * Events: 'open' | 'audio' (Buffer pcm16) | 'transcript' {role,text}
- *         'state' {data,missing} | 'idle' | 'speaking' bool | 'done' {data}
+ *         'state' {data,missing} | 'focus' {registration} | 'idle'
+ *         'speaking' bool | 'done' {data}
  *         'debug' (every event, for the inspector) | 'error' | 'close'
  *
  * The conversation is half duplex: the agent never listens while it talks, and
@@ -48,7 +49,7 @@ export class FormAgent extends EventEmitter {
     // start_registration only ever adds FURTHER people.
     this.registrations = new Map();
     this.nextId = 1;
-    this.#open({ label, prefill });
+    this.focused = this.#open({ label, prefill }).id;   // who the agent is addressing
     this.sessionId = sessionId;
     this.speaking = false;
     this.responsePending = false;       // we asked for a response, none finished yet
@@ -204,6 +205,8 @@ export class FormAgent extends EventEmitter {
    */
   #resolve(id) {
     if (id) return this.registrations.get(id) || null;
+    const focused = this.registrations.get(this.focused);
+    if (focused?.status === 'open') return focused;
     const open = [...this.registrations.values()].filter((r) => r.status === 'open');
     return open.length === 1 ? open[0] : null;
   }
@@ -245,6 +248,7 @@ export class FormAgent extends EventEmitter {
       state: r.state,
       status: r.status,
       result: r.result,
+      focused: r.id === this.focused,
     }));
   }
 
@@ -454,8 +458,21 @@ export class FormAgent extends EventEmitter {
       };
     }
 
+    if (name === 'focus') {
+      this.focused = reg.id;
+      this.#scheduleBoard();
+      this.emit('focus', { registration: reg.id, label: this.#labelOf(reg) });
+      return { ok: true, registration: reg.id, label: this.#labelOf(reg), missing: reg.state.missing() };
+    }
+
     if (name === 'save_fields') {
-      const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {});
+      // Saving onto someone other than the person being addressed is allowed,
+      // and recorded. A human reading the table sees exactly that.
+      const addressing = reg.id === this.focused
+        ? null
+        : (this.#labelOf(this.registrations.get(this.focused)) || this.focused);
+
+      const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {}, { addressing });
       this.#publish(reg);
       return {
         registration: reg.id,
@@ -485,6 +502,10 @@ export class FormAgent extends EventEmitter {
 
     if (name === 'close_registration') {
       reg.status = 'closed';
+      if (this.focused === reg.id) {
+        const next = [...this.registrations.values()].find((r) => r.status === 'open');
+        if (next) { this.focused = next.id; this.emit('focus', { registration: next.id, label: this.#labelOf(next) }); }
+      }
       this.trace.write({ dir: 'tool', type: 'closed', registration: reg.id, reason: args.reason });
       return { ok: true, registration: reg.id };
     }

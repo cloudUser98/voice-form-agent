@@ -22,6 +22,8 @@
   .heard { background: #dff5e3; color: #096; }
   .inferred, .prefill { background: #ffe9c7; color: #a60; }
   .corrected { background: #e2e8ff; color: #33a; }
+  .cross { background: #ffe0e0; color: #b00; }
+  .focused { color: #0a5; }
   .missing td { color: #bbb; }
   h3 { margin: 1.4rem 0 .2rem; font-size: .95rem; color: #333; }
 </style>
@@ -39,8 +41,10 @@
     <div id="log"></div>
     <div id="forms"></div>
     <p id="hint" style="color:#888;font-size:.85rem">
-      Amber means the agent worked the value out rather than hearing it — check those.
-      Click any value to correct it; the conversation carries on uninterrupted.
+      ▶ marks who the agent is addressing. Amber means it worked the value out
+      rather than hearing it; red <b>cross</b> means it was saved onto this form
+      while the agent was talking to someone else — check those. Click any value
+      to correct it.
     </p>
   </div>
   <div>
@@ -68,6 +72,7 @@ const log = (cls, text) => {
 // there. A value the agent invented shows up amber with no quote behind it.
 // One block per registration; the agent may be serving several people.
 const openForms = new Map();
+let focusedId = null;
 
 function render(ev, ws) {
   if (ev.registration) openForms.set(ev.registration, { ...openForms.get(ev.registration), ...ev });
@@ -77,7 +82,9 @@ function render(ev, ws) {
 function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws) {
   const wrap = document.createElement('section');
   const h = document.createElement('h3');
-  h.textContent = `${id} · ${label || '(sin nombre)'}${result ? ` — ${JSON.stringify(result)}` : ''}`;
+  const mark = id === focusedId ? '▶ ' : '';
+  h.textContent = `${mark}${id} · ${label || '(sin nombre)'}${result ? ` — ${JSON.stringify(result)}` : ''}`;
+  if (id === focusedId) h.className = 'focused';
   const table = document.createElement('table');
   table.innerHTML = '<thead><tr><th>Field</th><th>Value</th><th>Based on</th><th></th></tr></thead>';
   const body = document.createElement('tbody');
@@ -117,10 +124,15 @@ function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws
     const q = document.createElement('td');
     q.className = 'quote';
     q.textContent = ev.heard ? `“${ev.heard}”` : (has ? '— nothing quoted —' : '');
+    if (ev.cross) q.textContent += `  ⚠ saved while addressing ${ev.cross}`;
     row.append(q);
 
     const tag = document.createElement('td');
-    if (has) tag.innerHTML = `<span class="tag ${ev.source || 'inferred'}">${ev.source || 'inferred'}</span>`;
+    if (has) {
+      const src = ev.source || 'inferred';
+      tag.innerHTML = `<span class="tag ${src}">${src}</span>`
+        + (ev.cross ? ' <span class="tag cross">cross</span>' : '');
+    }
     row.append(tag);
     return row;
   }));
@@ -232,6 +244,7 @@ $('go').onclick = async () => {
     if (e.type === 'transcript') log(e.role, e.text);
     if (e.type === 'state') render(e, ws);
     if (e.type === 'speaking') { generating = e.on; paintMic(); }
+    if (e.type === 'focus') { focusedId = e.registration; render({}, ws); }
     if (e.type === 'debug') logEvent(e.entry);
     if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
