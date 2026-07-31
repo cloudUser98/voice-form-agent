@@ -1,3 +1,5 @@
+import { blocking } from '../src/tools.js';
+
 // Corporate receptionist. The whole form is the schema plus a paragraph.
 export default {
   name: 'visit',
@@ -47,8 +49,10 @@ frases cortas, y reconoce lo que te acaban de decir antes de seguir.`,
     },
   },
 
-  async submit(data) {
-    // Swap for the real endpoint. Kept local so the agent runs standalone.
-    return { folio: `V-${Date.now().toString(36).toUpperCase()}` };
-  },
+  // `blocking`: the visitor waits for their folio rather than wandering off
+  // mid-save. Swap the body for the real endpoint — the decorator already
+  // covers the wait, and a local call this fast never triggers the filler.
+  submit: blocking(async (data) => ({ folio: `V-${Date.now().toString(36).toUpperCase()}` }), {
+    say: 'Dile en UNA frase que estás guardando el registro y que espere un momento.',
+  }),
 };

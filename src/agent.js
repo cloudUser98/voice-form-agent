@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { buildInstructions, buildTools, nextAction } from './prompt.js';
 import { FormState } from './form-state.js';
+import { modeOf, withTimeout } from './tools.js';
 import { openTrace } from './trace.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -16,7 +17,8 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  * Events: 'open' | 'audio' (Buffer pcm16) | 'transcript' {role,text}
  *         'state' {data,missing} | 'focus' {registration} | 'idle'
  *         'speaking' bool | 'done' {data}
- *         'flush' (drop buffered audio) | 'debug' (every event) | 'error' | 'close'
+ *         'flush' (drop buffered audio) | 'busy' bool (a tool has the floor)
+ *         'debug' (every event) | 'error' | 'close'
  *
  * The conversation is half duplex: the agent never listens while it talks, and
  * is never interrupted.
@@ -54,6 +56,7 @@ export class FormAgent extends EventEmitter {
     this.responsePending = false;       // we asked for a response, none finished yet
     this.queued = false;                // something wanted the floor while busy
     this.pendingNudge = false;          // a room event that still needs a reply
+    this.busy = false;                  // a blocking tool has the floor
     this.audio = null;                  // the response currently being spoken
     this.truncatedItem = null;          // its deltas are stale; drop them
     this.opts = { apiKey, model, voice };
@@ -82,7 +85,7 @@ export class FormAgent extends EventEmitter {
    * never talk over itself.
    */
   sendAudio(chunk) {
-    if (this.speaking) return;
+    if (this.speaking || this.busy) return;
     this.#send({ type: 'input_audio_buffer.append', audio: Buffer.from(chunk).toString('base64') });
   }
 
@@ -178,7 +181,7 @@ export class FormAgent extends EventEmitter {
     }
 
     if (!lines.length) return;                 // same people as before: stay quiet
-    this.#roomEvent(lines.join('\n'));
+    this.#interject(lines.join('\n'));
   }
 
   close() { clearTimeout(this.boardTimer); this.ws?.close(); }
@@ -265,7 +268,7 @@ export class FormAgent extends EventEmitter {
    * back up. This is NOT barge-in: a visitor still cannot interrupt, only the
    * room can, and only for one sentence.
    */
-  #roomEvent(text) {
+  #interject(text) {
     this.#record({ dir: 'room', text });
 
     const interrupting = this.speaking || this.responsePending;
@@ -375,6 +378,51 @@ export class FormAgent extends EventEmitter {
 
     if (next.state.complete) next.beatDone = true;         // do not read back twice
     return this.#beat(`${farewell}\n\n${then}`);
+  }
+
+  /**
+   * Run a tool the way it was decorated.
+   *
+   * Undecorated and `blocking` are both awaited, so callers get a real result
+   * and none of their bookkeeping changes. The difference is that a slow
+   * blocking tool says so first, and holds the floor while it works.
+   */
+  async #call(fn, ...args) {
+    const meta = modeOf(fn);
+    if (!meta) return fn?.(...args);                   // unchanged path
+
+    const work = withTimeout(Promise.resolve().then(() => fn(...args)), meta.timeoutMs);
+
+    if (!meta.hold) {
+      // Answer the model straight away so the conversation never stalls, and
+      // report back later through the same interjection an arrival uses.
+      work.then(
+        (r) => meta.announce && this.#interject(meta.done?.(r)
+          || `It finished: ${JSON.stringify(r)}. Tell them briefly.`),
+        (e) => meta.announce && this.#interject(meta.fail?.(e)
+          || 'It failed. Apologise in ONE short sentence and say they should ask at the desk.'),
+      );
+      return { ok: true, status: 'in_progress', note: 'Started. Do NOT say it is finished yet.' };
+    }
+
+    this.busy = true;
+    this.emit('busy', true);
+    try {
+      // Only cover the wait if there is a wait worth covering — a 50ms tool
+      // does not need "un momento".
+      const finishedFast = await Promise.race([
+        work.then(() => true, () => true),
+        new Promise((r) => setTimeout(() => r(false), meta.coverAfterMs)),
+      ]);
+      if (!finishedFast) {
+        this.#requestResponse(this.#beat(meta.say
+          || 'Tell them you are dealing with it and to wait a moment. Do NOT say it is done.'));
+      }
+      return await work;
+    } finally {
+      this.busy = false;
+      this.emit('busy', false);
+    }
   }
 
   /** When the person being addressed is finished with, move to whoever is next. */
@@ -510,6 +558,7 @@ export class FormAgent extends EventEmitter {
       // A room event that arrived mid-sentence has been waiting for the floor.
       if (this.pendingNudge) { this.pendingNudge = false; return this.#requestResponse(); }
       if (this.queued) { this.queued = false; return this.#requestResponse(); }
+      if (this.busy) return;                           // a blocking tool holds the floor
       return this.emit('idle');                        // agent finished its turn
     }
 
@@ -612,7 +661,7 @@ export class FormAgent extends EventEmitter {
       if (missing.length) return { ok: false, registration: reg.id, missing };
       try {
         const snapshot = reg.state.snapshot();
-        const result = (await this.form.submit?.({ ...snapshot.data })) || {};
+        const result = (await this.#call(this.form.submit, { ...snapshot.data })) || {};
         reg.status = 'submitted';
         reg.result = result;
         this.#advanceFocus(reg);
@@ -634,7 +683,7 @@ export class FormAgent extends EventEmitter {
 
     const custom = (this.form.tools || []).find((t) => t.definition.name === name);
     if (custom) {
-      try { return await custom.run(args, { data: reg.state.data }); }
+      try { return await this.#call(custom.run, args, { data: reg.state.data }); }
       catch (err) { return { ok: false, error: String(err.message || err) }; }
     }
 
