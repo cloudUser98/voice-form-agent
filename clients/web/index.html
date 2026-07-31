@@ -251,6 +251,7 @@ $('go').onclick = async () => {
   ws.onmessage = (ev) => {
     if (ev.data instanceof ArrayBuffer) return play(ev.data);
     const e = JSON.parse(ev.data);
+    if (e.type === 'waiting') $('status').textContent = 'armed — waiting for someone to arrive';
     if (e.type === 'ready') $('status').textContent = 'listening';
     if (e.type === 'transcript') log(e.role, e.text);
     if (e.type === 'state') render(e, ws);

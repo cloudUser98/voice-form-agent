@@ -31,12 +31,14 @@ ws.on('open', () => ws.send(JSON.stringify({ type: 'start', form, notes, mode: '
 ws.on('message', (raw, isBinary) => {
   if (isBinary) return;                       // a real client would play this
   const e = JSON.parse(raw);
-  if (e.type === 'ready') {
-    console.log(`— session ${e.session} · trace ${e.trace}`);
+  // 'ready' now only arrives once somebody is in the room, so the opening
+  // arrival has to be sent as soon as the session is armed.
+  if (e.type === 'waiting') {
     console.log('  /arrive <name> · /arrive · /leave <name> · /empty\n');
     room.desconocidos.push({});           // somebody walks up, so it wakes
     snapshot();
   }
+  if (e.type === 'ready') console.log(`— session ${e.session} · trace ${e.trace}\n`);
   if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
   if (e.type === 'state') console.log(`   [${e.registration} ${e.label || '(sin nombre)'} · missing: ${e.missing.join(', ') || 'nothing'}]`);
   if (e.type === 'done') console.log(`✅ ${e.registration} ${e.label || ''} ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`);

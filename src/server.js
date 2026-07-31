@@ -3,12 +3,17 @@
 // Binary frames are PCM16 mono 24kHz audio, in both directions.
 // Text frames are JSON control/events.
 //
-//   client -> {type:'start', form, prefill?, notes?, mode?}
+//   client -> {type:'start', form, notes?, mode?, debug?}   arms the session
 //   client -> {type:'text', text}          typed input instead of speech
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'detected', event}   a raw snapshot, if the client owns the camera
+//   server -> {type:'waiting'}   armed; nobody is in the room yet
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'speaking'|'flush'|'done'|'error'}
 //   server -> {type:'debug', entry}   every event, when start asked for it
+//
+// `start` only arms the session. The realtime connection is opened by the
+// first person the camera reports, so a kiosk facing an empty lobby overnight
+// holds no session at all.
 import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { FormAgent } from './agent.js';
@@ -31,6 +36,7 @@ console.log(`voice-form-agent listening on ws://localhost:${PORT}`);
 
 wss.on('connection', (ws) => {
   let agent = null;
+  let config = null;                  // what to build once somebody shows up
   let detector = null;
   const say = (obj) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
 
@@ -41,53 +47,69 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(data); } catch { return say({ type: 'error', error: 'invalid json' }); }
 
     if (msg.type === 'start') {
-      if (agent) return say({ type: 'error', error: 'already started' });
+      if (config) return say({ type: 'error', error: 'already started' });
       try {
-        const form = await loadForm(msg.form);
-        agent = new FormAgent({
-          form,
-          prefill: msg.prefill || {},
-          notes: msg.notes || '',
+        config = {
+          form: await loadForm(msg.form),
           mode: msg.mode === 'text' ? 'text' : 'audio',
-        });
+          notes: msg.notes || '',
+          debug: !!msg.debug,
+        };
       } catch (err) {
         return say({ type: 'error', error: String(err.message || err) });
       }
-
-      agent.on('open', () => say({ type: 'ready', session: agent.sessionId, trace: agent.trace.file }));
-      agent.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
-      agent.on('transcript', (m) => say({ type: 'transcript', ...m }));
-      agent.on('state', (s) => say({ type: 'state', ...s }));
-      agent.on('idle', () => say({ type: 'idle' }));
-      agent.on('speaking', (on) => say({ type: 'speaking', on }));
-      agent.on('focus', (f) => say({ type: 'focus', ...f }));
-      agent.on('flush', () => say({ type: 'flush' }));
-      if (msg.debug) agent.on('debug', (entry) => say({ type: 'debug', entry }));
-      agent.on('done', (d) => say({ type: 'done', ...d }));
-      agent.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
-      agent.on('close', () => ws.close());
-
-      agent.start();
       watchDetector();
-      return;
+      return say({ type: 'waiting', form: msg.form });
     }
 
-    if (!agent) return say({ type: 'error', error: 'send {type:"start"} first' });
+    // A raw snapshot forwarded by a client that owns the camera itself. Allowed
+    // before an agent exists — it is the thing that creates one.
+    if (msg.type === 'detected') return feed(msg.event);
+
+    if (!agent) return say({ type: 'error', error: 'nobody has arrived at reception yet' });
     if (msg.type === 'text') return agent.sendText(msg.text);
     if (msg.type === 'correct') {
       const r = agent.correct(msg.field, msg.value, msg.registration);
       return r.ok || say({ type: 'error', error: r.error });
     }
-    // A raw snapshot forwarded by a client that owns the camera itself.
-    if (msg.type === 'detected') return feed(msg.event);
     say({ type: 'error', error: `unknown message ${msg.type}` });
   });
 
-  /** Raw detector snapshot in, agent instructions out. */
+  /**
+   * Raw detector snapshot in, agent instructions out — and the session itself
+   * if this is the first person through the door. An empty room never opens one.
+   */
   function feed(event) {
-    if (!agent) return;
+    if (!config) return;
     say({ type: 'detected', event });                 // straight into the inspector
-    agent.roomUpdate(planFromSnapshot(event, agent.form, agent.registrations));
+
+    const plan = planFromSnapshot(event, config.form, agent ? agent.registrations : new Map());
+
+    if (!agent) {
+      if (!plan.arrived.length) return;               // nobody there; stay asleep
+      agent = build();
+      agent.start();
+    }
+    // Fires ~400ms before the session is ready; roomUpdate queues it and drains
+    // on session.updated.
+    agent.roomUpdate(plan);
+  }
+
+  function build() {
+    const a = new FormAgent({ form: config.form, notes: config.notes, mode: config.mode });
+    a.on('open', () => say({ type: 'ready', session: a.sessionId, trace: a.trace.file }));
+    a.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
+    a.on('transcript', (m) => say({ type: 'transcript', ...m }));
+    a.on('state', (s) => say({ type: 'state', ...s }));
+    a.on('idle', () => say({ type: 'idle' }));
+    a.on('speaking', (on) => say({ type: 'speaking', on }));
+    a.on('focus', (f) => say({ type: 'focus', ...f }));
+    a.on('flush', () => say({ type: 'flush' }));
+    a.on('done', (d) => say({ type: 'done', ...d }));
+    a.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
+    a.on('close', () => ws.close());
+    if (config.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
+    return a;
   }
 
   /**
