@@ -2,7 +2,15 @@
 <meta charset="utf-8">
 <title>voice-form-agent</title>
 <style>
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 78rem; margin: 1.5rem auto; padding: 0 1rem; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
+  @media (max-width: 60rem) { .cols { grid-template-columns: 1fr; } }
+  #events { height: 26rem; overflow-y: auto; background: #0f1115; color: #cbd5e1; border-radius: 6px;
+            padding: .5rem .6rem; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #events div { white-space: pre-wrap; word-break: break-word; padding: 1px 0; cursor: pointer; }
+  .d-openai { color: #7dd3fc; } .d-tool { color: #fca5a5; } .d-room { color: #fcd34d; }
+  .d-openai.minor { color: #64748b; }
+  .mic-on { color: #0a5; font-weight: 600; } .mic-off { color: #a60; font-weight: 600; }
   button { font: inherit; padding: .5rem 1rem; }
   #log p { margin: .4rem 0; } .user { color: #444; } .agent { color: #0a5; }
   table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
@@ -24,13 +32,25 @@
   <button id="go">Start talking</button>
   <span id="status"></span>
 </p>
-<div id="log"></div>
+<p><span id="mic" class="mic-off">mic closed</span> — the agent never listens while it speaks.</p>
 
-<div id="forms"></div>
-<p id="hint" style="color:#888;font-size:.85rem">
-  Amber means the agent worked the value out rather than hearing it — check those.
-  Click any value to correct it; the conversation carries on uninterrupted.
-</p>
+<div class="cols">
+  <div>
+    <div id="log"></div>
+    <div id="forms"></div>
+    <p id="hint" style="color:#888;font-size:.85rem">
+      Amber means the agent worked the value out rather than hearing it — check those.
+      Click any value to correct it; the conversation carries on uninterrupted.
+    </p>
+  </div>
+  <div>
+    <p style="margin:0 0 .3rem;font-size:.85rem;color:#888">
+      Live events — click a line for the full payload.
+      <label style="float:right"><input type="checkbox" id="verbose"> show noise</label>
+    </p>
+    <div id="events"></div>
+  </div>
+</div>
 
 <script type="module">
 // Minimal browser client: microphone in, speech out. All the agent logic lives
@@ -107,6 +127,35 @@ function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws
   return wrap;
 }
 
+// Noisy per-chunk events, hidden unless you ask for them.
+const NOISE = /^(response\.output_audio\.delta|response\.output_audio_transcript\.delta|response\.function_call_arguments\.delta|conversation\.item\.input_audio_transcription\.delta|rate_limits\.updated|conversation\.item\.added|conversation\.item\.done|response\.content_part\.|response\.output_item\.)/;
+
+function logEvent(entry) {
+  const row = document.createElement('div');
+  const minor = entry.dir === 'openai' && NOISE.test(entry.type || '');
+  row.className = `d-${entry.dir}${minor ? ' minor' : ''}`;
+  if (minor && !$('verbose').checked) row.hidden = true;
+  row.dataset.minor = minor ? '1' : '';
+
+  let head;
+  if (entry.dir === 'tool') head = `🔧 ${entry.name}(${JSON.stringify(entry.args ?? {})}) → ${JSON.stringify(entry.result ?? {})}`;
+  else if (entry.dir === 'room') head = `🚪 ${entry.text}`;
+  else head = entry.type || JSON.stringify(entry);
+
+  row.textContent = head.length > 160 ? head.slice(0, 160) + ' …' : head;
+  row.title = 'click for the full payload';
+  row.onclick = () => { row.textContent = JSON.stringify(entry, null, 2); row.onclick = null; };
+
+  const box = $('events');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.append(row);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+$('verbose').onchange = () => {
+  for (const row of $('events').children) if (row.dataset.minor) row.hidden = !$('verbose').checked;
+};
+
 $('go').onclick = async () => {
   $('go').disabled = true;
   $('status').textContent = 'connecting…';
@@ -130,7 +179,18 @@ $('go').onclick = async () => {
     sources.push(src);
     src.onended = () => { sources = sources.filter((s) => s !== src); };
   };
-  const stopPlayback = () => { sources.forEach((s) => { try { s.stop(); } catch {} }); sources = []; cursor = 0; };
+  // Half duplex. The mic stays shut until the agent has stopped generating AND
+  // the speaker has finished playing what was already buffered — those are
+  // different moments, and reopening at the first one is how a kiosk ends up
+  // transcribing its own voice.
+  let generating = false;
+  const micOpen = () => !generating && ctx.currentTime >= cursor - 0.05;
+  const paintMic = () => {
+    const open = micOpen();
+    $('mic').className = open ? 'mic-on' : 'mic-off';
+    $('mic').textContent = open ? 'mic open — your turn' : 'mic closed — agent speaking';
+  };
+  setInterval(paintMic, 100);
 
   // ---- microphone --------------------------------------------------------
   const worklet = `class P extends AudioWorkletProcessor{
@@ -154,13 +214,14 @@ $('go').onclick = async () => {
 
   tap.port.onmessage = (e) => {
     if (ws.readyState !== WebSocket.OPEN) return;
+    if (!micOpen()) return;                    // never listen to ourselves
     const f32 = e.data;
     const pcm = new Int16Array(f32.length);
     for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
     ws.send(pcm.buffer);
   };
 
-  ws.onopen = () => { $('status').textContent = 'starting…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value })); };
+  ws.onopen = () => { $('status').textContent = 'starting…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
   ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
   ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
 
@@ -170,7 +231,8 @@ $('go').onclick = async () => {
     if (e.type === 'ready') $('status').textContent = 'listening';
     if (e.type === 'transcript') log(e.role, e.text);
     if (e.type === 'state') render(e, ws);
-    if (e.type === 'interrupted') stopPlayback();       // visitor started talking
+    if (e.type === 'speaking') { generating = e.on; paintMic(); }
+    if (e.type === 'debug') logEvent(e.entry);
     if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
   };

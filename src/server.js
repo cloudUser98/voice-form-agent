@@ -7,8 +7,8 @@
 //   client -> {type:'text', text}          typed input instead of speech
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'arrived', label, notes?} / {type:'left', label}
-//   client -> {type:'interrupt'}
-//   server -> {type:'ready'|'transcript'|'state'|'idle'|'interrupted'|'done'|'error'}
+//   server -> {type:'ready'|'transcript'|'state'|'idle'|'speaking'|'done'|'error'}
+//   server -> {type:'debug', entry}   every event, when start asked for it
 import 'dotenv/config';
 import { WebSocketServer } from 'ws';
 import { FormAgent } from './agent.js';
@@ -57,7 +57,8 @@ wss.on('connection', (ws) => {
       agent.on('transcript', (m) => say({ type: 'transcript', ...m }));
       agent.on('state', (s) => say({ type: 'state', ...s }));
       agent.on('idle', () => say({ type: 'idle' }));
-      agent.on('interrupted', () => say({ type: 'interrupted' }));
+      agent.on('speaking', (on) => say({ type: 'speaking', on }));
+      if (msg.debug) agent.on('debug', (entry) => say({ type: 'debug', entry }));
       agent.on('done', (d) => say({ type: 'done', ...d }));
       agent.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
       agent.on('close', () => ws.close());
@@ -67,7 +68,6 @@ wss.on('connection', (ws) => {
 
     if (!agent) return say({ type: 'error', error: 'send {type:"start"} first' });
     if (msg.type === 'text') return agent.sendText(msg.text);
-    if (msg.type === 'interrupt') return agent.interrupt();
     if (msg.type === 'correct') {
       const r = agent.correct(msg.field, msg.value, msg.registration);
       return r.ok || say({ type: 'error', error: r.error });

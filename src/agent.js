@@ -15,8 +15,11 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  * integration surface.
  *
  * Events: 'open' | 'audio' (Buffer pcm16) | 'transcript' {role,text}
- *         'state' {data,missing} | 'idle' | 'interrupted' | 'done' {data}
- *         'error' | 'close'
+ *         'state' {data,missing} | 'idle' | 'speaking' bool | 'done' {data}
+ *         'debug' (every event, for the inspector) | 'error' | 'close'
+ *
+ * The conversation is half duplex: the agent never listens while it talks, and
+ * is never interrupted.
  */
 export class FormAgent extends EventEmitter {
   constructor({
@@ -51,7 +54,6 @@ export class FormAgent extends EventEmitter {
     this.responsePending = false;       // we asked for a response, none finished yet
     this.queued = false;                // something wanted the floor while busy
     this.pendingNudge = false;          // a room event that still needs a reply
-    this.handledResponses = new Set();
     this.opts = { apiKey, model, voice };
     this.trace = openTrace(sessionId, { form: form.name, prefill, notes, mode });
   }
@@ -68,8 +70,17 @@ export class FormAgent extends EventEmitter {
     return this;
   }
 
-  /** Raw PCM16 mono 24kHz from whatever is holding the microphone. */
+  /**
+   * Raw PCM16 mono 24kHz from whatever is holding the microphone.
+   *
+   * The conversation is half duplex: while the agent has the floor nothing is
+   * listened to. A client should stop sending too — it knows when its speaker
+   * has actually finished playing, which is later than the model finishing
+   * generating — but dropping here means a client that does not gate can still
+   * never talk over itself.
+   */
   sendAudio(chunk) {
+    if (this.speaking) return;
     this.#send({ type: 'input_audio_buffer.append', audio: Buffer.from(chunk).toString('base64') });
   }
 
@@ -139,20 +150,22 @@ export class FormAgent extends EventEmitter {
       + (reg ? ` Their registration ${reg.id} is unfinished. Ask whether to carry on with it or close it.` : ''));
   }
 
-  /** Stop talking right now (someone started speaking, or the caller hung up). */
-  interrupt() {
-    if (!this.speaking) return;
-    this.#send({ type: 'response.cancel' });
-    this.speaking = false;
-    this.responsePending = false;
-    this.emit('interrupted');
-  }
-
   close() { clearTimeout(this.boardTimer); this.ws?.close(); }
 
   // ---------------------------------------------------------------- internals
 
   #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
+
+  /**
+   * Everything that happens, to the trace file and to anyone watching live.
+   * Base64 audio is reduced to a size so the stream stays readable.
+   */
+  #record(entry) {
+    this.trace.write(entry);
+    this.emit('debug', typeof entry.delta === 'string' && entry.delta.length > 80
+      ? { ...entry, delta: `<${entry.delta.length} b64 chars>` }
+      : entry);
+  }
 
   /**
    * The only place a response is ever requested.
@@ -216,7 +229,7 @@ export class FormAgent extends EventEmitter {
    * If it is mid-sentence the reply waits for the turn to end.
    */
   #roomEvent(text) {
-    this.trace.write({ dir: 'room', text });
+    this.#record({ dir: 'room', text });
     this.#send({
       type: 'conversation.item.create',
       item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] },
@@ -321,7 +334,7 @@ export class FormAgent extends EventEmitter {
    * the agent without a socket.
    */
   handleEvent(e) {
-    this.trace.write({ dir: 'openai', ...e });
+    this.#record({ dir: 'openai', ...e });
 
     switch (e.type) {
       case 'session.updated':
@@ -331,30 +344,22 @@ export class FormAgent extends EventEmitter {
       case 'error':
         return this.emit('error', new Error(e.error?.message || 'realtime error'));
 
-      case 'input_audio_buffer.speech_started':
-        return this.interrupt();                       // barge-in
-
       case 'conversation.item.input_audio_transcription.completed':
         return this.emit('transcript', { role: 'user', text: e.transcript });
 
       case 'response.created':
         this.speaking = true;
+        this.emit('speaking', true);
         return;
 
       case 'response.output_audio.delta':
         return this.emit('audio', Buffer.from(e.delta, 'base64'));
 
-      case 'response.done': {
+      case 'response.done':
         this.speaking = false;
         this.responsePending = false;
-        const id = e.response?.id;
-        // The server emits a SECOND response.done (status 'cancelled') when a
-        // barge-in cancel races a response that had already finished. Same id,
-        // same content — handling both printed the agent's line twice.
-        if (id && this.handledResponses.has(id)) return;
-        if (id) this.handledResponses.add(id);
+        this.emit('speaking', false);
         return this.#onResponseDone(e.response);
-      }
     }
   }
 
@@ -389,7 +394,7 @@ export class FormAgent extends EventEmitter {
       let args = {};
       try { args = JSON.parse(call.arguments || '{}'); } catch { /* model sent junk; treated as empty */ }
       const result = await this.#runTool(call.name, args);
-      this.trace.write({ dir: 'tool', name: call.name, args, result });
+      this.#record({ dir: 'tool', name: call.name, args, result });
       this.#send({
         type: 'conversation.item.create',
         item: { type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) },
