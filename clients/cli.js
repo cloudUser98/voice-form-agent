@@ -33,13 +33,19 @@ ws.on('message', (raw, isBinary) => {
   const e = JSON.parse(raw);
   if (e.type === 'ready') console.log(`— session ${e.session} · trace ${e.trace}\n`);
   if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
-  if (e.type === 'state') console.log(`   [${Object.keys(e.data).length} filled · missing: ${e.missing.join(', ') || 'nothing'}]`);
-  if (e.type === 'done') { console.log(`✅ ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`); ws.close(); }
+  if (e.type === 'state') console.log(`   [${e.registration} ${e.label || '(sin nombre)'} · missing: ${e.missing.join(', ') || 'nothing'}]`);
+  if (e.type === 'done') console.log(`✅ ${e.registration} ${e.label || ''} ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`);
   if (e.type === 'error') console.error(`⚠️  ${e.error}`);
   if (e.type === 'idle') { waiting = true; queue.length ? pump() : rl.prompt(); }
 });
 
-rl.on('line', (line) => { if (line.trim()) { queue.push(line); pump(); } });
+// /arrive Ana Ruiz  ·  /leave Ana Ruiz  — drive presence by hand until the
+// face detector is wired up in Stage C.
+rl.on('line', (line) => {
+  const room = line.match(/^\/(arrive|leave)\s+(.+)$/);
+  if (room) return ws.send(JSON.stringify({ type: room[1] === 'arrive' ? 'arrived' : 'left', label: room[2].trim() }));
+  if (line.trim()) { queue.push(line); pump(); }
+});
 rl.on('close', () => { if (!queue.length && !waiting) ws.close(); });
 ws.on('close', () => { rl.close(); process.exit(0); });
 ws.on('error', (e) => { console.error(`cannot reach ${url}: ${e.message}`); process.exit(1); });

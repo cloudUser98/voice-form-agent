@@ -5,7 +5,8 @@
 //
 //   client -> {type:'start', form, prefill?, notes?, mode?}
 //   client -> {type:'text', text}          typed input instead of speech
-//   client -> {type:'correct', field, value}   human overrules the agent
+//   client -> {type:'correct', registration?, field, value}  human overrules
+//   client -> {type:'arrived', label, notes?} / {type:'left', label}
 //   client -> {type:'interrupt'}
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'interrupted'|'done'|'error'}
 import 'dotenv/config';
@@ -68,9 +69,12 @@ wss.on('connection', (ws) => {
     if (msg.type === 'text') return agent.sendText(msg.text);
     if (msg.type === 'interrupt') return agent.interrupt();
     if (msg.type === 'correct') {
-      const r = agent.correct(msg.field, msg.value);
+      const r = agent.correct(msg.field, msg.value, msg.registration);
       return r.ok || say({ type: 'error', error: r.error });
     }
+    // Presence, from a face detector or from a developer poking at it by hand.
+    if (msg.type === 'arrived') return agent.personArrived(msg);
+    if (msg.type === 'left') return agent.personLeft(msg);
     say({ type: 'error', error: `unknown message ${msg.type}` });
   });
 

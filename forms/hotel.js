@@ -12,6 +12,7 @@ Sé breve y natural; nunca suenes como un cuestionario.`,
   // Sin confirmación hablada: en cuanto están los datos, se envía. Misma
   // máquina que `visit`, comportamiento opuesto, una línea de diferencia.
   onComplete: false,
+  labelFrom: 'huesped',
 
   schema: {
     type: 'object',

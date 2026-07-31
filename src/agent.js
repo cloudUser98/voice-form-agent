@@ -23,7 +23,8 @@ export class FormAgent extends EventEmitter {
     form,
     prefill = {},
     notes = '',
-    label = '',                         // who this form is for, if known
+    label = '',                         // who the first form is for, if known
+    maxOpen = 6,                        // guard against runaway registrations
     mode = 'audio',                     // 'audio' | 'text'
     apiKey = process.env.OPENAI_API_KEY,
     model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
@@ -36,15 +37,21 @@ export class FormAgent extends EventEmitter {
 
     this.form = form;
     this.mode = mode;
-    this.state = new FormState(form.schema, { prefill, label });
-    this.label = label;
     this.notes = notes;
+    this.maxOpen = maxOpen;
+
+    // One registration per person. r1 always exists — the agent is always
+    // talking to somebody — so the single-visitor path is unchanged and
+    // start_registration only ever adds FURTHER people.
+    this.registrations = new Map();
+    this.nextId = 1;
+    this.#open({ label, prefill });
     this.sessionId = sessionId;
-    this.submitted = false;
     this.speaking = false;
+    this.responsePending = false;       // we asked for a response, none finished yet
+    this.queued = false;                // something wanted the floor while busy
+    this.pendingNudge = false;          // a room event that still needs a reply
     this.handledResponses = new Set();
-    this.beatDone = false;              // has the completion beat been spoken?
-    this.result = null;
     this.opts = { apiKey, model, voice };
     this.trace = openTrace(sessionId, { form: form.name, prefill, notes, mode });
   }
@@ -73,7 +80,7 @@ export class FormAgent extends EventEmitter {
       item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
     });
     this.trace.write({ dir: 'in', type: 'user.text', text });
-    this.#send({ type: 'response.create' });
+    this.#requestResponse();
   }
 
   /**
@@ -82,12 +89,16 @@ export class FormAgent extends EventEmitter {
    * it stops believing the old value. Deliberately does NOT make the agent
    * speak: correcting a typo should not interrupt the conversation.
    */
-  correct(field, value) {
-    const outcome = this.state.correct(field, value);
+  correct(field, value, registration) {
+    const reg = this.#resolve(registration);
+    if (!reg) return { ok: false, error: `unknown registration ${registration ?? '(missing)'}` };
+
+    const outcome = reg.state.correct(field, value);
     if (!outcome.ok) return outcome;
 
-    const cleared = this.state.data[field] === undefined;
-    this.trace.write({ dir: 'human', type: 'correct', field, value });
+    const cleared = reg.state.data[field] === undefined;
+    const who = this.#labelOf(reg) || reg.id;
+    this.trace.write({ dir: 'human', type: 'correct', registration: reg.id, field, value });
 
     // A correction is a point-in-time event, so it goes in the history as a
     // system item. The resulting *state* is carried by the board instead.
@@ -99,14 +110,33 @@ export class FormAgent extends EventEmitter {
         content: [{
           type: 'input_text',
           text: cleared
-            ? `A staff member cleared "${field}". Treat it as missing again. Do not mention this correction.`
-            : `A staff member corrected "${field}" to ${JSON.stringify(value)}. This is now the truth; do not save anything different for it and do not mention this correction.`,
+            ? `A staff member cleared "${field}" for ${who} (${reg.id}). Treat it as missing again. Do not mention this correction.`
+            : `A staff member corrected "${field}" for ${who} (${reg.id}) to ${JSON.stringify(value)}. This is now the truth; do not save anything different for it and do not mention this correction.`,
         }],
       },
     });
 
-    this.#publish();
+    this.#publish(reg);
     return { ok: true };
+  }
+
+  /**
+   * Somebody new is in the room. Greeting them is a conversational decision, so
+   * this only supplies the fact; the model decides how to welcome them.
+   */
+  personArrived({ label = '', notes = '' } = {}) {
+    this.#roomEvent(`${label || 'Someone'} has just arrived at reception.`
+      + (notes ? ` ${notes}` : '')
+      + ' Greet them briefly now and call start_registration so they are on the board,'
+      + ' but do not ask them any questions until the registration in progress is submitted or closed.');
+  }
+
+  /** Somebody walked out. If they had a form open, the agent should ask. */
+  personLeft({ label = '' } = {}) {
+    const reg = [...this.registrations.values()]
+      .find((r) => r.status === 'open' && this.#labelOf(r) === label);
+    this.#roomEvent(`${label || 'Someone'} has left reception.`
+      + (reg ? ` Their registration ${reg.id} is unfinished. Ask whether to carry on with it or close it.` : ''));
   }
 
   /** Stop talking right now (someone started speaking, or the caller hung up). */
@@ -114,6 +144,7 @@ export class FormAgent extends EventEmitter {
     if (!this.speaking) return;
     this.#send({ type: 'response.cancel' });
     this.speaking = false;
+    this.responsePending = false;
     this.emit('interrupted');
   }
 
@@ -123,21 +154,85 @@ export class FormAgent extends EventEmitter {
 
   #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
 
-  #publish() {
+  /**
+   * The only place a response is ever requested.
+   *
+   * `speaking` alone was not enough: it flips on response.created, so between
+   * sending response.create and hearing back there was a window where a second
+   * request slipped through and the server rejected it with "Conversation
+   * already has an active response in progress".
+   */
+  #requestResponse(overrides = null) {
+    if (this.responsePending) { this.queued = true; return; }
+    this.responsePending = true;
+    this.queued = false;
+    this.#send(overrides ? { type: 'response.create', response: overrides } : { type: 'response.create' });
+  }
+
+  /** Create a registration. Also the reason r1 exists before anyone speaks. */
+  #open({ label = '', prefill = {} } = {}) {
+    const id = `r${this.nextId++}`;
+    const reg = {
+      id,
+      label,
+      state: new FormState(this.form.schema, { prefill, label }),
+      status: 'open',
+      result: null,
+      beatDone: false,
+    };
+    this.registrations.set(id, reg);
+    return reg;
+  }
+
+  /**
+   * Which registration a tool call meant. A missing id resolves to the only
+   * open one — a model that forgets the argument in a one-visitor conversation
+   * should not produce an error the visitor can hear.
+   */
+  #resolve(id) {
+    if (id) return this.registrations.get(id) || null;
+    const open = [...this.registrations.values()].filter((r) => r.status === 'open');
+    return open.length === 1 ? open[0] : null;
+  }
+
+  /** The name to show and to call the person by. */
+  #labelOf(reg) {
+    return reg.label || reg.state.data[this.form.labelFrom] || '';
+  }
+
+  #publish(reg) {
     // A correction that empties a required field earns a fresh confirmation.
-    if (!this.state.complete) this.beatDone = false;
-    this.emit('state', this.state.snapshot());
+    if (!reg.state.complete) reg.beatDone = false;
+    this.emit('state', {
+      registration: reg.id,
+      label: this.#labelOf(reg),
+      ...reg.state.snapshot(),
+    });
     this.#scheduleBoard();
   }
 
+  /**
+   * A fact from the room, injected without making the agent speak over itself.
+   * If it is mid-sentence the reply waits for the turn to end.
+   */
+  #roomEvent(text) {
+    this.trace.write({ dir: 'room', text });
+    this.#send({
+      type: 'conversation.item.create',
+      item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] },
+    });
+    if (this.speaking || this.responsePending) { this.pendingNudge = true; return; }
+    this.#requestResponse();
+  }
+
   #entries() {
-    return [{
-      id: '',
-      label: this.label,
-      state: this.state,
-      status: this.submitted ? 'submitted' : 'open',
-      result: this.result,
-    }];
+    return [...this.registrations.values()].map((r) => ({
+      id: r.id,
+      label: this.#labelOf(r),
+      state: r.state,
+      status: r.status,
+      result: r.result,
+    }));
   }
 
   /**
@@ -148,7 +243,7 @@ export class FormAgent extends EventEmitter {
    * failure stops being something it can do, rather than something we ask it
    * not to. Returns null when the form submits silently.
    */
-  #completionBeat() {
+  #completionBeat(reg) {
     if (!this.form.onComplete) return null;
     return {
       tool_choice: 'none',
@@ -158,9 +253,9 @@ export class FormAgent extends EventEmitter {
       instructions: [
         this.form.persona.trim(),
         '',
-        nextAction(this.form, { label: this.label, state: this.state }),
+        nextAction(this.form, { label: this.#labelOf(reg), state: reg.state }),
         '',
-        `Datos registrados: ${JSON.stringify(this.state.snapshot().data)}`,
+        `Datos registrados: ${JSON.stringify(reg.state.snapshot().data)}`,
       ].join('\n'),
     };
   }
@@ -251,6 +346,7 @@ export class FormAgent extends EventEmitter {
 
       case 'response.done': {
         this.speaking = false;
+        this.responsePending = false;
         const id = e.response?.id;
         // The server emits a SECOND response.done (status 'cancelled') when a
         // barge-in cancel races a response that had already finished. Same id,
@@ -265,7 +361,7 @@ export class FormAgent extends EventEmitter {
   #greet() {
     // One nudge to open the conversation. Everything after this is driven by
     // the visitor speaking.
-    this.#send({ type: 'response.create' });
+    this.#requestResponse();
   }
 
   async #onResponseDone(response) {
@@ -280,9 +376,14 @@ export class FormAgent extends EventEmitter {
     }
 
     const calls = (response?.output || []).filter((i) => i.type === 'function_call');
-    if (!calls.length) return this.emit('idle');       // agent finished its turn
+    if (!calls.length) {
+      // A room event that arrived mid-sentence has been waiting for the floor.
+      if (this.pendingNudge) { this.pendingNudge = false; return this.#requestResponse(); }
+      if (this.queued) { this.queued = false; return this.#requestResponse(); }
+      return this.emit('idle');                        // agent finished its turn
+    }
 
-    const wasIncomplete = !this.state.complete;
+    const before = new Map([...this.registrations].map(([id, r]) => [id, r.state.complete]));
 
     for (const call of calls) {
       let args = {};
@@ -298,51 +399,94 @@ export class FormAgent extends EventEmitter {
     // The board must be current BEFORE the model speaks again: this is the
     // turn where a form may have just become complete.
     this.#flushBoard();
-    if (this.submitted) return;
+    this.pendingNudge = false;
 
-    if (wasIncomplete && this.state.complete && !this.beatDone) {
-      const beat = this.#completionBeat();
+    // Whichever registration just became complete gets its forced beat.
+    const justCompleted = [...this.registrations.values()].find(
+      (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id),
+    );
+    if (justCompleted) {
+      const beat = this.#completionBeat(justCompleted);
       if (beat) {
-        this.beatDone = true;
-        return this.#send({ type: 'response.create', response: beat });
+        justCompleted.beatDone = true;
+        return this.#requestResponse(beat);
       }
     }
 
     // The model is waiting on those results — give it the floor back.
-    this.#send({ type: 'response.create' });
+    this.#requestResponse();
   }
 
   async #runTool(name, args) {
     // Tool results report what happened. What to do next lives in the board.
-    if (name === 'save_fields') {
-      const { quotes = {}, ...patch } = args;
-      const { problems, changed } = this.state.save(patch, quotes);
-      this.#publish();
+    if (name === 'open_registrations') {
       return {
+        registrations: [...this.registrations.values()].map((r) => ({
+          id: r.id, label: this.#labelOf(r), status: r.status, missing: r.state.missing(),
+        })),
+      };
+    }
+
+    if (name === 'start_registration') {
+      const open = [...this.registrations.values()].filter((r) => r.status === 'open');
+      if (open.length >= this.maxOpen) {
+        return { ok: false, error: `too many open registrations (limit ${this.maxOpen})` };
+      }
+      const reg = this.#open({ label: String(args.label || '').trim() });
+      this.#publish(reg);
+      return { registration: reg.id, label: this.#labelOf(reg) };
+    }
+
+    // Everything below is about one specific person.
+    const reg = this.#resolve(args.registration);
+    if (!reg) {
+      return {
+        ok: false,
+        error: `unknown registration ${args.registration ?? '(missing)'}`,
+        valid: [...this.registrations.values()]
+          .filter((r) => r.status === 'open')
+          .map((r) => ({ id: r.id, label: this.#labelOf(r) })),
+      };
+    }
+
+    if (name === 'save_fields') {
+      const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {});
+      this.#publish(reg);
+      return {
+        registration: reg.id,
+        label: this.#labelOf(reg),
         saved: changed,
-        missing: this.state.missing(),
+        missing: reg.state.missing(),
         ...(problems.length ? { rejected: problems } : {}),
       };
     }
 
     if (name === 'submit_form') {
-      const missing = this.state.missing();
-      if (missing.length) return { ok: false, missing };
+      const missing = reg.state.missing();
+      if (missing.length) return { ok: false, registration: reg.id, missing };
       try {
-        const snapshot = this.state.snapshot();
+        const snapshot = reg.state.snapshot();
         const result = (await this.form.submit?.({ ...snapshot.data })) || {};
-        this.submitted = true;
-        this.result = result;
-        this.emit('done', { ...snapshot, result });
-        return { ok: true, ...result };
+        reg.status = 'submitted';
+        reg.result = result;
+        this.emit('done', {
+          registration: reg.id, label: this.#labelOf(reg), ...snapshot, result,
+        });
+        return { ok: true, registration: reg.id, ...result };
       } catch (err) {
         return { ok: false, error: 'The registration system did not respond.' };
       }
     }
 
+    if (name === 'close_registration') {
+      reg.status = 'closed';
+      this.trace.write({ dir: 'tool', type: 'closed', registration: reg.id, reason: args.reason });
+      return { ok: true, registration: reg.id };
+    }
+
     const custom = (this.form.tools || []).find((t) => t.definition.name === name);
     if (custom) {
-      try { return await custom.run(args, { data: this.state.data }); }
+      try { return await custom.run(args, { data: reg.state.data }); }
       catch (err) { return { ok: false, error: String(err.message || err) }; }
     }
 

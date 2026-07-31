@@ -13,6 +13,9 @@ frases cortas, y reconoce lo que te acaban de decir antes de seguir.`,
   // confirmación. Pon `false` y se envía sin confirmar.
   onComplete: 'read-back',
 
+  // Qué campo pone nombre al registro en el tablero.
+  labelFrom: 'visitante',
+
   schema: {
     type: 'object',
     required: ['visitante', 'procedencia', 'motivo', 'anfitrion'],

@@ -15,6 +15,7 @@
   .inferred, .prefill { background: #ffe9c7; color: #a60; }
   .corrected { background: #e2e8ff; color: #33a; }
   .missing td { color: #bbb; }
+  h3 { margin: 1.4rem 0 .2rem; font-size: .95rem; color: #333; }
 </style>
 
 <h1>voice-form-agent</h1>
@@ -25,10 +26,7 @@
 </p>
 <div id="log"></div>
 
-<table>
-  <thead><tr><th>Field</th><th>Value</th><th>Based on</th><th></th></tr></thead>
-  <tbody id="fields"></tbody>
-</table>
+<div id="forms"></div>
 <p id="hint" style="color:#888;font-size:.85rem">
   Amber means the agent worked the value out rather than hearing it — check those.
   Click any value to correct it; the conversation carries on uninterrupted.
@@ -48,9 +46,25 @@ const log = (cls, text) => {
 
 // The correction surface: every field, what it was based on, and how it got
 // there. A value the agent invented shows up amber with no quote behind it.
-function render({ data = {}, missing = [], evidence = {} }, ws) {
+// One block per registration; the agent may be serving several people.
+const openForms = new Map();
+
+function render(ev, ws) {
+  if (ev.registration) openForms.set(ev.registration, { ...openForms.get(ev.registration), ...ev });
+  $('forms').replaceChildren(...[...openForms.entries()].map(([id, e]) => block(id, e, ws)));
+}
+
+function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws) {
+  const wrap = document.createElement('section');
+  const h = document.createElement('h3');
+  h.textContent = `${id} · ${label || '(sin nombre)'}${result ? ` — ${JSON.stringify(result)}` : ''}`;
+  const table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>Field</th><th>Value</th><th>Based on</th><th></th></tr></thead>';
+  const body = document.createElement('tbody');
+  wrap.append(h, table); table.append(body);
+
   const names = [...new Set([...Object.keys(data), ...missing])];
-  $('fields').replaceChildren(...names.map((name) => {
+  body.replaceChildren(...names.map((name) => {
     const row = document.createElement('tr');
     const has = data[name] !== undefined;
     if (!has) row.className = 'missing';
@@ -71,9 +85,9 @@ function render({ data = {}, missing = [], evidence = {} }, ws) {
         const raw = input.value.trim();
         // Lists are typed comma-separated; the schema decides which is which.
         const value = Array.isArray(data[name]) ? raw.split(',').map((s) => s.trim()).filter(Boolean) : raw;
-        ws.send(JSON.stringify({ type: 'correct', field: name, value }));
+        ws.send(JSON.stringify({ type: 'correct', registration: id, field: name, value }));
       };
-      input.onkeydown = (k) => { if (k.key === 'Enter') commit(); if (k.key === 'Escape') render({ data, missing, evidence }, ws); };
+      input.onkeydown = (k) => { if (k.key === 'Enter') commit(); if (k.key === 'Escape') render({}, ws); };
       input.onblur = commit;
       cell.replaceChildren(input);
       input.focus();
@@ -90,6 +104,7 @@ function render({ data = {}, missing = [], evidence = {} }, ws) {
     row.append(tag);
     return row;
   }));
+  return wrap;
 }
 
 $('go').onclick = async () => {
@@ -156,7 +171,7 @@ $('go').onclick = async () => {
     if (e.type === 'transcript') log(e.role, e.text);
     if (e.type === 'state') render(e, ws);
     if (e.type === 'interrupted') stopPlayback();       // visitor started talking
-    if (e.type === 'done') { $('status').textContent = `done · ${JSON.stringify(e.result)}`; render(e, ws); }
+    if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
   };
 };
