@@ -332,28 +332,58 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
-   * The turn where the form has just become complete, forced to be speech.
+   * A turn that MUST be speech.
    *
    * `tool_choice: 'none'` makes tool calls impossible for this one response, so
-   * the model cannot reach for submit_form and skip the confirmation — the
-   * failure stops being something it can do, rather than something we ask it
-   * not to. Returns null when the form submits silently.
+   * the model cannot quietly skip what it was asked to say. Per-response
+   * instructions REPLACE the session's rather than merging, so the persona has
+   * to travel with them or the agent drops character for the turn.
    */
-  #completionBeat(reg) {
-    if (!this.form.onComplete) return null;
+  #beat(directive) {
     return {
       tool_choice: 'none',
-      // Per-response instructions REPLACE the session's rather than merging,
-      // so the persona has to travel with them or the agent drops character
-      // for this turn and reads the record out like a spreadsheet.
-      instructions: [
-        this.form.persona.trim(),
-        '',
-        nextAction(this.form, { label: this.#labelOf(reg), state: reg.state }),
-        '',
-        `Datos registrados: ${JSON.stringify(reg.state.snapshot().data)}`,
-      ].join('\n'),
+      instructions: [this.form.persona.trim(), '', directive].join('\n'),
     };
+  }
+
+  /** A form just filled up and the visitor has not confirmed it yet. */
+  #completionBeat(reg) {
+    if (!this.form.onComplete) return null;
+    return this.#beat(
+      `${nextAction(this.form, { label: this.#labelOf(reg), state: reg.state })}\n\n`
+      + `Datos registrados: ${JSON.stringify(reg.state.snapshot().data)}`);
+  }
+
+  /**
+   * Somebody was just finished with and other people are still waiting. Without
+   * this the agent says goodbye and stops, and a visitor has to prompt it to
+   * carry on.
+   */
+  #handoverBeat(finished) {
+    const next = this.registrations.get(this.focused);
+    if (!next || next.status !== 'open') return null;      // nobody left to serve
+
+    const farewell = `You have just finished with ${this.#labelOf(finished) || finished.id}. `
+      + 'Say goodbye to them in ONE short sentence, then turn to '
+      + `${this.#labelOf(next) || 'the visitor still waiting'}, who has not been registered yet.`;
+
+    // If that person's form is already full, what they need is their
+    // confirmation, not another question.
+    const then = next.state.complete
+      ? nextAction(this.form, { label: this.#labelOf(next), state: next.state })
+      : `Ask them for the first thing you still need: ${next.state.missing().join(', ')}.`;
+
+    if (next.state.complete) next.beatDone = true;         // do not read back twice
+    return this.#beat(`${farewell}\n\n${then}`);
+  }
+
+  /** When the person being addressed is finished with, move to whoever is next. */
+  #advanceFocus(from) {
+    if (this.focused !== from.id) return;
+    const next = [...this.registrations.values()].find((r) => r.status === 'open');
+    if (!next) return;
+    this.focused = next.id;
+    this.emit('focus', { registration: next.id, label: this.#labelOf(next) });
   }
 
   #instructions() {
@@ -483,7 +513,8 @@ export class FormAgent extends EventEmitter {
       return this.emit('idle');                        // agent finished its turn
     }
 
-    const before = new Map([...this.registrations].map(([id, r]) => [id, r.state.complete]));
+    const before = new Map([...this.registrations].map(
+      ([id, r]) => [id, { complete: r.state.complete, status: r.status }]));
 
     for (const call of calls) {
       let args = {};
@@ -501,9 +532,19 @@ export class FormAgent extends EventEmitter {
     this.#flushBoard();
     this.pendingNudge = false;
 
+    // Somebody was finished with this turn and others are still waiting.
+    // Checked first: it subsumes the completion case for the person handed to.
+    const justFinished = [...this.registrations.values()].find(
+      (r) => r.status !== 'open' && before.get(r.id)?.status === 'open',
+    );
+    if (justFinished) {
+      const beat = this.#handoverBeat(justFinished);
+      if (beat) return this.#requestResponse(beat);
+    }
+
     // Whichever registration just became complete gets its forced beat.
     const justCompleted = [...this.registrations.values()].find(
-      (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id),
+      (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id)?.complete,
     );
     if (justCompleted) {
       const beat = this.#completionBeat(justCompleted);
@@ -574,6 +615,7 @@ export class FormAgent extends EventEmitter {
         const result = (await this.form.submit?.({ ...snapshot.data })) || {};
         reg.status = 'submitted';
         reg.result = result;
+        this.#advanceFocus(reg);
         this.emit('done', {
           registration: reg.id, label: this.#labelOf(reg), ...snapshot, result,
         });
@@ -585,10 +627,7 @@ export class FormAgent extends EventEmitter {
 
     if (name === 'close_registration') {
       reg.status = 'closed';
-      if (this.focused === reg.id) {
-        const next = [...this.registrations.values()].find((r) => r.status === 'open');
-        if (next) { this.focused = next.id; this.emit('focus', { registration: next.id, label: this.#labelOf(next) }); }
-      }
+      this.#advanceFocus(reg);
       this.trace.write({ dir: 'tool', type: 'closed', registration: reg.id, reason: args.reason });
       return { ok: true, registration: reg.id };
     }

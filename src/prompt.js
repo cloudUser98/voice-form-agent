@@ -49,10 +49,12 @@ export function buildBoard(form, entries) {
 
     let tail;
     if (status === 'submitted') {
-      // Without this the agent keeps making conversation after the folio is
-      // issued, because the board still reads as work outstanding.
-      tail = `   SUBMITTED${result?.folio ? ` (${result.folio})` : ''} ▸ NEXT: say goodbye in ONE short sentence. `
-           + `Do not ask for anything else and do not call any tool.`;
+      // Status only. What to do next depends on the WHOLE board, not on one
+      // row — a row saying "say goodbye and stop" is what stranded the people
+      // still waiting.
+      tail = `   SUBMITTED${result?.folio ? ` (${result.folio})` : ''}`;
+    } else if (status === 'closed') {
+      tail = '   CLOSED';
     } else if (missing.length) {
       tail = `   missing: ${missing.join(', ')}`;
     } else {
@@ -62,7 +64,23 @@ export function buildBoard(form, entries) {
     return `${head}\n   filled: ${filled}\n${tail}`;
   });
 
-  return `=== OPEN FORMS ===\n${lines.join('\n')}${sharedGaps(entries)}`;
+  return `=== OPEN FORMS ===\n${lines.join('\n')}${sharedGaps(entries)}${whatNext(entries)}`;
+}
+
+/**
+ * One instruction for the whole board, so it can see who is still waiting. A
+ * per-row instruction cannot: that is how a finished registration ended up
+ * telling the agent to stop while somebody stood there unserved.
+ */
+function whatNext(entries) {
+  if (!entries.some((e) => e.status !== 'open')) return '';   // nothing has ended yet
+  const open = entries.filter((e) => e.status === 'open');
+
+  return open.length
+    ? `\n\n  ${open[0].id} (${open[0].label || 'the unidentified visitor'}) is still waiting `
+      + 'and has NOT been registered.'
+    : '\n\n  Everyone has been dealt with. Say goodbye in ONE short sentence, '
+      + 'ask nothing else and call no tool.';
 }
 
 /**
