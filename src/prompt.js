@@ -27,7 +27,8 @@ export function nextAction(form, { label, state }) {
   }
   if (rule === 'read-back') {
     const who = label ? ` to ${label}` : '';
-    return `If you have not already done so, repeat the recorded details back${who} in ONE natural sentence and ask them to confirm. Once they have confirmed, call submit_form. Do not read the details back twice.`;
+    return `The form is complete but NOT yet submitted. Repeat the recorded details back${who} in ONE natural sentence and ask them to confirm. `
+         + `Only after they confirm, call submit_form. If you already asked and they confirmed, call submit_form now.`;
   }
   if (typeof rule === 'function') {
     return String(rule(state.data, { label }) || '').trim();
@@ -39,16 +40,24 @@ export function nextAction(form, { label, state }) {
 export function buildBoard(form, entries) {
   if (!entries.length) return '=== OPEN FORMS ===\n(none yet)';
 
-  const lines = entries.map(({ id, label, state }) => {
+  const lines = entries.map(({ id, label, state, status, result }) => {
     const head = [id, label || '(unnamed)'].filter(Boolean).join(' ');
     const filled = Object.entries(state.data)
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
       .join(', ') || '(nothing yet)';
     const missing = state.missing();
 
-    const tail = missing.length
-      ? `   missing: ${missing.join(', ')}`
-      : `   COMPLETE ▸ NEXT: ${nextAction(form, { label, state })}`;
+    let tail;
+    if (status === 'submitted') {
+      // Without this the agent keeps making conversation after the folio is
+      // issued, because the board still reads as work outstanding.
+      tail = `   SUBMITTED${result?.folio ? ` (${result.folio})` : ''} ▸ NEXT: say goodbye in ONE short sentence. `
+           + `Do not ask for anything else and do not call any tool.`;
+    } else if (missing.length) {
+      tail = `   missing: ${missing.join(', ')}`;
+    } else {
+      tail = `   COMPLETE ▸ NEXT: ${nextAction(form, { label, state })}`;
+    }
 
     return `${head}\n   filled: ${filled}\n${tail}`;
   });

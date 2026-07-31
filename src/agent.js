@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
-import { buildInstructions, buildTools } from './prompt.js';
+import { buildInstructions, buildTools, nextAction } from './prompt.js';
 import { FormState } from './form-state.js';
 import { openTrace } from './trace.js';
 
@@ -43,6 +43,8 @@ export class FormAgent extends EventEmitter {
     this.submitted = false;
     this.speaking = false;
     this.handledResponses = new Set();
+    this.beatDone = false;              // has the completion beat been spoken?
+    this.result = null;
     this.opts = { apiKey, model, voice };
     this.trace = openTrace(sessionId, { form: form.name, prefill, notes, mode });
   }
@@ -122,11 +124,46 @@ export class FormAgent extends EventEmitter {
   #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
 
   #publish() {
+    // A correction that empties a required field earns a fresh confirmation.
+    if (!this.state.complete) this.beatDone = false;
     this.emit('state', this.state.snapshot());
     this.#scheduleBoard();
   }
 
-  #entries() { return [{ id: '', label: this.label, state: this.state }]; }
+  #entries() {
+    return [{
+      id: '',
+      label: this.label,
+      state: this.state,
+      status: this.submitted ? 'submitted' : 'open',
+      result: this.result,
+    }];
+  }
+
+  /**
+   * The turn where the form has just become complete, forced to be speech.
+   *
+   * `tool_choice: 'none'` makes tool calls impossible for this one response, so
+   * the model cannot reach for submit_form and skip the confirmation — the
+   * failure stops being something it can do, rather than something we ask it
+   * not to. Returns null when the form submits silently.
+   */
+  #completionBeat() {
+    if (!this.form.onComplete) return null;
+    return {
+      tool_choice: 'none',
+      // Per-response instructions REPLACE the session's rather than merging,
+      // so the persona has to travel with them or the agent drops character
+      // for this turn and reads the record out like a spreadsheet.
+      instructions: [
+        this.form.persona.trim(),
+        '',
+        nextAction(this.form, { label: this.label, state: this.state }),
+        '',
+        `Datos registrados: ${JSON.stringify(this.state.snapshot().data)}`,
+      ].join('\n'),
+    };
+  }
 
   #instructions() {
     return buildInstructions(this.form, { notes: this.notes, entries: this.#entries() });
@@ -245,6 +282,8 @@ export class FormAgent extends EventEmitter {
     const calls = (response?.output || []).filter((i) => i.type === 'function_call');
     if (!calls.length) return this.emit('idle');       // agent finished its turn
 
+    const wasIncomplete = !this.state.complete;
+
     for (const call of calls) {
       let args = {};
       try { args = JSON.parse(call.arguments || '{}'); } catch { /* model sent junk; treated as empty */ }
@@ -259,9 +298,18 @@ export class FormAgent extends EventEmitter {
     // The board must be current BEFORE the model speaks again: this is the
     // turn where a form may have just become complete.
     this.#flushBoard();
+    if (this.submitted) return;
+
+    if (wasIncomplete && this.state.complete && !this.beatDone) {
+      const beat = this.#completionBeat();
+      if (beat) {
+        this.beatDone = true;
+        return this.#send({ type: 'response.create', response: beat });
+      }
+    }
 
     // The model is waiting on those results — give it the floor back.
-    if (!this.submitted) this.#send({ type: 'response.create' });
+    this.#send({ type: 'response.create' });
   }
 
   async #runTool(name, args) {
@@ -284,6 +332,7 @@ export class FormAgent extends EventEmitter {
         const snapshot = this.state.snapshot();
         const result = (await this.form.submit?.({ ...snapshot.data })) || {};
         this.submitted = true;
+        this.result = result;
         this.emit('done', { ...snapshot, result });
         return { ok: true, ...result };
       } catch (err) {
