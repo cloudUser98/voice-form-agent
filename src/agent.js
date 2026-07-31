@@ -42,6 +42,7 @@ export class FormAgent extends EventEmitter {
     this.sessionId = sessionId;
     this.submitted = false;
     this.speaking = false;
+    this.handledResponses = new Set();
     this.opts = { apiKey, model, voice };
     this.trace = openTrace(sessionId, { form: form.name, prefill, notes, mode });
   }
@@ -52,7 +53,7 @@ export class FormAgent extends EventEmitter {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     this.ws.on('open', () => this.#configure());
-    this.ws.on('message', (raw) => this.#onEvent(JSON.parse(raw)));
+    this.ws.on('message', (raw) => this.handleEvent(JSON.parse(raw)));
     this.ws.on('error', (err) => this.emit('error', err));
     this.ws.on('close', () => { this.trace.close(); this.emit('close'); });
     return this;
@@ -183,7 +184,11 @@ export class FormAgent extends EventEmitter {
     });
   }
 
-  #onEvent(e) {
+  /**
+   * Handle one server event. Public so tests — and a trace replay — can drive
+   * the agent without a socket.
+   */
+  handleEvent(e) {
     this.trace.write({ dir: 'openai', ...e });
 
     switch (e.type) {
@@ -207,9 +212,16 @@ export class FormAgent extends EventEmitter {
       case 'response.output_audio.delta':
         return this.emit('audio', Buffer.from(e.delta, 'base64'));
 
-      case 'response.done':
+      case 'response.done': {
         this.speaking = false;
+        const id = e.response?.id;
+        // The server emits a SECOND response.done (status 'cancelled') when a
+        // barge-in cancel races a response that had already finished. Same id,
+        // same content — handling both printed the agent's line twice.
+        if (id && this.handledResponses.has(id)) return;
+        if (id) this.handledResponses.add(id);
         return this.#onResponseDone(e.response);
+      }
     }
   }
 
