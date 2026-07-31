@@ -7,7 +7,7 @@ import { FormAgent } from '../src/agent.js';
  */
 export function converse(form, lines, { prefill, notes, label, timeoutMs = 90000, verbose } = {}) {
   return new Promise((resolve, reject) => {
-    const agent = new FormAgent({ form, prefill, notes, label, mode: 'text' });
+    const agent = new FormAgent({ form, notes, mode: 'text' });
     const script = [...lines];
     const transcript = [];
     let last = { data: prefill ? { ...prefill } : {}, missing: [] };
@@ -55,5 +55,11 @@ export function converse(form, lines, { prefill, notes, label, timeoutMs = 90000
     });
 
     agent.start();
+    // Nothing happens until the room says somebody is there. A scripted person
+    // talking implies a person present, so put one there.
+    agent.once('open', () => agent.roomUpdate({
+      arrived: [{ origin: label ? 'known' : 'unknown', personKey: label || null,
+                  label: label || '', prefill: prefill || {}, notes: '' }],
+    }));
   });
 }

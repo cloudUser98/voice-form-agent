@@ -32,6 +32,7 @@
 <p>
   <select id="form"><option>visit</option><option>hotel</option></select>
   <button id="go">Start talking</button>
+  <button id="arrive" disabled>Someone arrives</button>
   <span id="status"></span>
 </p>
 <p><span id="mic" class="mic-off">mic closed</span> — the agent never listens while it speaks.</p>
@@ -176,7 +177,6 @@ $('go').onclick = async () => {
 
   // ---- playback: schedule chunks back to back on one moving cursor --------
   let cursor = 0;
-  let sources = [];
   const play = (buf) => {
     const pcm = new Int16Array(buf);
     const audio = ctx.createBuffer(1, pcm.length, RATE);
@@ -195,6 +195,8 @@ $('go').onclick = async () => {
   // the speaker has finished playing what was already buffered — those are
   // different moments, and reopening at the first one is how a kiosk ends up
   // transcribing its own voice.
+  let sources = [];
+  const stopPlayback = () => { sources.forEach((s) => { try { s.stop(); } catch {} }); sources = []; cursor = 0; };
   let generating = false;
   const micOpen = () => !generating && ctx.currentTime >= cursor - 0.05;
   const paintMic = () => {
@@ -233,7 +235,16 @@ $('go').onclick = async () => {
     ws.send(pcm.buffer);
   };
 
-  ws.onopen = () => { $('status').textContent = 'starting…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
+  // No detector running? Fake a snapshot so the agent wakes up.
+  const room = { type: 'people_detected', conocidos: [], desconocidos: [] };
+  $('arrive').disabled = false;
+  $('arrive').onclick = () => {
+    room.desconocidos.push({});
+    room.total = room.conocidos.length + room.desconocidos.length;
+    ws.send(JSON.stringify({ type: 'detected', event: room }));
+  };
+
+  ws.onopen = () => { $('status').textContent = 'waiting for someone to arrive…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
   ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
   ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
 
@@ -245,6 +256,7 @@ $('go').onclick = async () => {
     if (e.type === 'state') render(e, ws);
     if (e.type === 'speaking') { generating = e.on; paintMic(); }
     if (e.type === 'focus') { focusedId = e.registration; render({}, ws); }
+    if (e.type === 'flush') stopPlayback();      // cut short to acknowledge the room
     if (e.type === 'debug') logEvent(e.entry);
     if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;

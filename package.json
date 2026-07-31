@@ -7,7 +7,7 @@
     "serve": "node src/server.js",
     "cli": "node clients/cli.js",
     "test": "node --test test/",
-    "probe": "node test/probe.js"
+    "dev:detector": "node detector-sim.js"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

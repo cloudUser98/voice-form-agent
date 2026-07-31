@@ -13,10 +13,17 @@ import { converse } from './helpers.js';
 const live = { skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
 
 /** An agent with a fake socket, so tool results are readable without a network. */
-function harness(opts = {}) {
+function harness({ arrive = [''], ...opts } = {}) {
   const agent = new FormAgent({ form: visit, mode: 'text', apiKey: 'test-key', ...opts });
   const sent = [];
   agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
+  agent.handleEvent({ type: 'session.updated' });
+
+  // Registrations only exist because the room says a person does.
+  if (arrive.length) agent.roomUpdate({ arrived: arrive.map((label) => ({
+    origin: label ? 'known' : 'unknown', personKey: label || null,
+    label: label || '', prefill: {}, notes: '',
+  })) });
 
   let n = 0;
   const call = async (name, args = {}) => {
@@ -24,8 +31,7 @@ function harness(opts = {}) {
     agent.handleEvent({
       type: 'response.done',
       response: {
-        id: `resp_${++n}`,
-        status: 'completed',
+        id: `resp_${++n}`, status: 'completed',
         output: [{ type: 'function_call', name, call_id: `c${n}`, arguments: JSON.stringify(args) }],
       },
     });
@@ -40,17 +46,15 @@ function harness(opts = {}) {
 const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
 
 describe('registrations', () => {
-  test('r1 exists before anyone has said a word', () => {
+  test('somebody walking in is what creates r1', () => {
     const { agent } = harness();
     assert.deepEqual([...agent.registrations.keys()], ['r1']);
   });
 
-  test('start_registration opens another one', async () => {
-    const { agent, call } = harness();
-    const r = await call('start_registration', { label: 'Ana Ruiz' });
-    assert.equal(r.registration, 'r2');
-    assert.equal(r.label, 'Ana Ruiz');
+  test('a second arrival opens r2', () => {
+    const { agent } = harness({ arrive: ['', 'Ana Ruiz'] });
     assert.equal(agent.registrations.size, 2);
+    assert.equal(agent.registrations.get('r2').label, 'Ana Ruiz');
   });
 
   test('a missing id falls back to the only open registration', async () => {
@@ -61,16 +65,14 @@ describe('registrations', () => {
   });
 
   test('a wrong id is refused and the valid ones are offered back', async () => {
-    const { call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { call } = harness({ arrive: ['', 'Ana Ruiz'] });
     const r = await call('save_fields', { registration: 'r9', fields: { procedencia: 'Lala' } });
     assert.equal(r.ok, false);
     assert.deepEqual(r.valid.map((v) => v.id), ['r1', 'r2']);
   });
 
   test('each registration keeps its own values', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('save_fields', { registration: 'r1', fields: { procedencia: 'Dominos' } });
     await call('save_fields', { registration: 'r2', fields: { procedencia: 'Lala' } });
 
@@ -86,8 +88,7 @@ describe('registrations', () => {
   });
 
   test('open_registrations reports what each person still needs', async () => {
-    const { call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('save_fields', { registration: 'r1', fields: FULL });
     const r = await call('open_registrations');
 
@@ -96,8 +97,7 @@ describe('registrations', () => {
   });
 
   test('a closed registration stops being the fallback', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('close_registration', { registration: 'r1', reason: 'se fue' });
     assert.equal(agent.registrations.get('r1').status, 'closed');
 
@@ -105,17 +105,13 @@ describe('registrations', () => {
     assert.equal(r.registration, 'r2', 'the only OPEN one should take it');
   });
 
-  test('maxOpen refuses to spawn registrations forever', async () => {
-    const { call } = harness({ maxOpen: 2 });
-    await call('start_registration', { label: 'Ana' });
-    const r = await call('start_registration', { label: 'Beto' });
-    assert.equal(r.ok, false);
-    assert.match(r.error, /too many/);
+  test('maxOpen caps how many people can be registering at once', () => {
+    const { agent } = harness({ maxOpen: 2, arrive: ['', 'Ana', 'Beto', 'Caro'] });
+    assert.equal(agent.registrations.size, 2);
   });
 
   test('the completion beat is tracked per registration', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('save_fields', { registration: 'r1', fields: FULL });
 
     assert.equal(agent.registrations.get('r1').beatDone, true);
@@ -123,8 +119,7 @@ describe('registrations', () => {
   });
 
   test('a correction targets the registration it was given', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('save_fields', { registration: 'r1', fields: { procedencia: 'Dominos' } });
 
     assert.deepEqual(agent.correct('procedencia', 'Grupo Lala', 'r2'), { ok: true });
@@ -137,7 +132,7 @@ describe('two people in the room', () => {
   test('a newcomer gets their own registration', live, async () => {
     const r = await converse(visit, [
       'Soy Víctor Dávalos, vengo de Dominos.',
-      (agent) => agent.personArrived({ label: 'Ana Ruiz' }),
+      (agent) => agent.roomUpdate({ arrived: [{ origin: 'known', personKey: 'p_ana', label: 'Ana Ruiz', prefill: {}, notes: '' }] }),
       'Buenas tardes, soy Ana Ruiz.',
       'Vengo a una junta.',
     ]);
@@ -150,7 +145,7 @@ describe('two people in the room', () => {
   test('an interjection does not overwrite the other person\'s answer', live, async () => {
     const r = await converse(visit, [
       'Soy Víctor Dávalos, vengo de Dominos.',
-      (agent) => agent.personArrived({ label: 'Ana Ruiz' }),
+      (agent) => agent.roomUpdate({ arrived: [{ origin: 'known', personKey: 'p_ana', label: 'Ana Ruiz', prefill: {}, notes: '' }] }),
       'Perdón, yo soy Ana Ruiz y vengo de Lala.',   // Ana, unprompted, clearly not Víctor
       'Sigo yo: vengo a entregar un paquete.',  // Víctor again
     ]);

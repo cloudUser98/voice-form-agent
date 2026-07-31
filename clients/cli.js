@@ -31,7 +31,12 @@ ws.on('open', () => ws.send(JSON.stringify({ type: 'start', form, notes, mode: '
 ws.on('message', (raw, isBinary) => {
   if (isBinary) return;                       // a real client would play this
   const e = JSON.parse(raw);
-  if (e.type === 'ready') console.log(`— session ${e.session} · trace ${e.trace}\n`);
+  if (e.type === 'ready') {
+    console.log(`— session ${e.session} · trace ${e.trace}`);
+    console.log('  /arrive <name> · /arrive · /leave <name> · /empty\n');
+    room.desconocidos.push({});           // somebody walks up, so it wakes
+    snapshot();
+  }
   if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
   if (e.type === 'state') console.log(`   [${e.registration} ${e.label || '(sin nombre)'} · missing: ${e.missing.join(', ') || 'nothing'}]`);
   if (e.type === 'done') console.log(`✅ ${e.registration} ${e.label || ''} ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`);
@@ -39,11 +44,25 @@ ws.on('message', (raw, isBinary) => {
   if (e.type === 'idle') { waiting = true; queue.length ? pump() : rl.prompt(); }
 });
 
-// /arrive Ana Ruiz  ·  /leave Ana Ruiz  — drive presence by hand until the
-// face detector is wired up in Stage C.
+// The room drives everything now, so hold a snapshot and mutate it by hand:
+//   /arrive Ana Ruiz   /arrive            (unidentified)
+//   /leave  Ana Ruiz   /empty
+const room = { type: 'people_detected', conocidos: [], desconocidos: [] };
+const snapshot = () => {
+  room.total = room.conocidos.length + room.desconocidos.length;
+  ws.send(JSON.stringify({ type: 'detected', event: room }));
+};
+
 rl.on('line', (line) => {
-  const room = line.match(/^\/(arrive|leave)\s+(.+)$/);
-  if (room) return ws.send(JSON.stringify({ type: room[1] === 'arrive' ? 'arrived' : 'left', label: room[2].trim() }));
+  const cmd = line.match(/^\/(arrive|leave|empty)\s*(.*)$/);
+  if (cmd) {
+    const [, verb, who] = cmd;
+    if (verb === 'empty') { room.conocidos = []; room.desconocidos = []; }
+    else if (verb === 'leave') room.conocidos = room.conocidos.filter((p) => p.visitante !== who.trim());
+    else if (who.trim()) room.conocidos.push({ persona_id: `p_${who.trim()}`, visitante: who.trim() });
+    else room.desconocidos.push({});
+    return snapshot();
+  }
   if (line.trim()) { queue.push(line); pump(); }
 });
 rl.on('close', () => { if (!queue.length && !waiting) ws.close(); });

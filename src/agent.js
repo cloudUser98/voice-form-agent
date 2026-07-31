@@ -7,17 +7,16 @@ import { openTrace } from './trace.js';
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 
 /**
- * A headless voice agent that fills one form.
+ * A headless voice agent that fills a form per person.
  *
- * Audio in / audio out plus a few events. It knows nothing about browsers,
- * kiosks, cameras or avatars — whatever put a caller in front of it passes
- * what it already knows as `prefill` and `notes`, and that is the entire
- * integration surface.
+ * It knows nothing about browsers, kiosks, cameras or avatars. Somebody else
+ * watches the room and tells it who is there via roomUpdate(); until that
+ * happens the agent is connected but silent.
  *
  * Events: 'open' | 'audio' (Buffer pcm16) | 'transcript' {role,text}
  *         'state' {data,missing} | 'focus' {registration} | 'idle'
  *         'speaking' bool | 'done' {data}
- *         'debug' (every event, for the inspector) | 'error' | 'close'
+ *         'flush' (drop buffered audio) | 'debug' (every event) | 'error' | 'close'
  *
  * The conversation is half duplex: the agent never listens while it talks, and
  * is never interrupted.
@@ -25,9 +24,7 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 export class FormAgent extends EventEmitter {
   constructor({
     form,
-    prefill = {},
     notes = '',
-    label = '',                         // who the first form is for, if known
     maxOpen = 6,                        // guard against runaway registrations
     mode = 'audio',                     // 'audio' | 'text'
     apiKey = process.env.OPENAI_API_KEY,
@@ -44,19 +41,23 @@ export class FormAgent extends EventEmitter {
     this.notes = notes;
     this.maxOpen = maxOpen;
 
-    // One registration per person. r1 always exists — the agent is always
-    // talking to somebody — so the single-visitor path is unchanged and
-    // start_registration only ever adds FURTHER people.
+    // Registrations exist because the room says a person exists. The model
+    // never creates one, and none exist until the first detection arrives.
     this.registrations = new Map();
     this.nextId = 1;
-    this.focused = this.#open({ label, prefill }).id;   // who the agent is addressing
+    this.focused = null;
+    this.greeted = false;
+    this.pendingRoom = [];              // updates that beat the session handshake
+
     this.sessionId = sessionId;
     this.speaking = false;
     this.responsePending = false;       // we asked for a response, none finished yet
     this.queued = false;                // something wanted the floor while busy
     this.pendingNudge = false;          // a room event that still needs a reply
+    this.audio = null;                  // the response currently being spoken
+    this.truncatedItem = null;          // its deltas are stale; drop them
     this.opts = { apiKey, model, voice };
-    this.trace = openTrace(sessionId, { form: form.name, prefill, notes, mode });
+    this.trace = openTrace(sessionId, { form: form.name, notes, mode });
   }
 
   start() {
@@ -133,22 +134,51 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
-   * Somebody new is in the room. Greeting them is a conversational decision, so
-   * this only supplies the fact; the model decides how to welcome them.
+   * The room changed. This is the ONLY thing that creates or retires a
+   * registration — the model never decides who exists.
+   *
+   * One snapshot produces one message and one response, so a group that walks
+   * in together is greeted once rather than once per person. An identical
+   * snapshot produces nothing, so a camera may fire continuously in silence.
    */
-  personArrived({ label = '', notes = '' } = {}) {
-    this.#roomEvent(`${label || 'Someone'} has just arrived at reception.`
-      + (notes ? ` ${notes}` : '')
-      + ' Greet them briefly now and call start_registration so they are on the board,'
-      + ' but do not ask them any questions until the registration in progress is submitted or closed.');
-  }
+  roomUpdate({ arrived = [], departed = [], unidentifiedLeft = 0 } = {}) {
+    if (!this.ready) { this.pendingRoom.push({ arrived, departed, unidentifiedLeft }); return; }
 
-  /** Somebody walked out. If they had a form open, the agent should ask. */
-  personLeft({ label = '' } = {}) {
-    const reg = [...this.registrations.values()]
-      .find((r) => r.status === 'open' && this.#labelOf(r) === label);
-    this.#roomEvent(`${label || 'Someone'} has left reception.`
-      + (reg ? ` Their registration ${reg.id} is unfinished. Ask whether to carry on with it or close it.` : ''));
+    const lines = [];
+
+    for (const person of arrived) {
+      const open = [...this.registrations.values()].filter((r) => r.status === 'open');
+      if (open.length >= this.maxOpen) break;        // a camera glitch cannot flood us
+      const reg = this.#open(person);
+      if (!this.focused) this.focused = reg.id;
+      this.#publish(reg);
+      lines.push(`- ${reg.id}: ${this.#labelOf(reg) || 'not identified by the camera'}`
+        + (person.notes ? ` (${person.notes})` : ''));
+    }
+
+    if (arrived.length) {
+      const first = !this.greeted;
+      this.greeted = true;
+      lines.unshift(first
+        ? `${arrived.length > 1 ? 'People have' : 'Someone has'} walked up to reception:`
+        : `${arrived.length > 1 ? 'More people have' : 'Someone else has'} arrived:`);
+      lines.push(arrived.length > 1
+        ? 'Greet them together in ONE short sentence, then get on with it.'
+        : 'Greet them briefly, then get on with it.');
+    }
+
+    for (const reg of departed) {
+      lines.push(`${this.#labelOf(reg) || reg.id} has left. Registration ${reg.id} is unfinished — `
+        + 'ask whether to carry on with it, and call close_registration if not.');
+    }
+
+    if (unidentifiedLeft) {
+      lines.push(`${unidentifiedLeft} unidentified visitor(s) left and the camera cannot say which. `
+        + 'Ask who is still here before closing anything.');
+    }
+
+    if (!lines.length) return;                 // same people as before: stay quiet
+    this.#roomEvent(lines.join('\n'));
   }
 
   close() { clearTimeout(this.boardTimer); this.ws?.close(); }
@@ -183,12 +213,14 @@ export class FormAgent extends EventEmitter {
     this.#send(overrides ? { type: 'response.create', response: overrides } : { type: 'response.create' });
   }
 
-  /** Create a registration. Also the reason r1 exists before anyone speaks. */
-  #open({ label = '', prefill = {} } = {}) {
+  /** Create a registration. Only ever called from roomUpdate. */
+  #open({ label = '', prefill = {}, origin = 'unknown', personKey = null } = {}) {
     const id = `r${this.nextId++}`;
     const reg = {
       id,
       label,
+      origin,
+      personKey,
       state: new FormState(this.form.schema, { prefill, label }),
       status: 'open',
       result: null,
@@ -228,17 +260,64 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
-   * A fact from the room, injected without making the agent speak over itself.
-   * If it is mid-sentence the reply waits for the turn to end.
+   * A fact from the room. Acknowledging an arrival a sentence late feels wrong,
+   * so if the agent is mid-sentence it gets cut off — and then picks the thread
+   * back up. This is NOT barge-in: a visitor still cannot interrupt, only the
+   * room can, and only for one sentence.
    */
   #roomEvent(text) {
     this.#record({ dir: 'room', text });
+
+    const interrupting = this.speaking || this.responsePending;
+    if (interrupting) this.#cutOff();
+
     this.#send({
       type: 'conversation.item.create',
-      item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] },
+      item: {
+        type: 'message',
+        role: 'system',
+        content: [{
+          type: 'input_text',
+          text: interrupting
+            ? `${text}\n\nYou were cut off mid-sentence. Acknowledge this in ONE short sentence, `
+              + 'then pick up exactly where you left off.'
+            : text,
+        }],
+      },
     });
-    if (this.speaking || this.responsePending) { this.pendingNudge = true; return; }
-    this.#requestResponse();
+
+    // tool_choice 'none' makes this turn speech: it cannot reach for a tool and
+    // silently skip the acknowledgement.
+    this.#requestResponse(interrupting ? { tool_choice: 'none' } : null);
+  }
+
+  /**
+   * Stop the agent talking, and tell the server how much the visitor actually
+   * HEARD. Without the truncate the model believes it finished the sentence,
+   * so on resuming it never repeats the half nobody heard.
+   */
+  #cutOff() {
+    const a = this.audio;
+    if (a?.itemId && a.firstAt) {
+      const generatedMs = (a.bytes / (24000 * 2)) * 1000;   // pcm16 mono @24k
+      const heardMs = Math.max(0, Math.min(Date.now() - a.firstAt, generatedMs));
+      this.#send({
+        type: 'conversation.item.truncate',
+        item_id: a.itemId,
+        content_index: 0,
+        audio_end_ms: Math.round(heardMs),
+      });
+      // Deltas already in flight keep arriving after a truncate; drop them or
+      // the agent talks over its own acknowledgement.
+      this.truncatedItem = a.itemId;
+    }
+    this.#send({ type: 'response.cancel' });
+    this.speaking = false;
+    this.responsePending = false;
+    this.queued = false;
+    this.audio = null;
+    this.emit('flush');                 // client empties its playback queue
+    this.emit('speaking', false);
   }
 
   #entries() {
@@ -342,7 +421,14 @@ export class FormAgent extends EventEmitter {
 
     switch (e.type) {
       case 'session.updated':
-        if (!this.ready) { this.ready = true; this.emit('open'); this.#greet(); }
+        if (!this.ready) {
+          this.ready = true;
+          this.emit('open');
+          // Anything the detector reported during the handshake.
+          const queued = this.pendingRoom;
+          this.pendingRoom = [];
+          for (const plan of queued) this.roomUpdate(plan);
+        }
         return;
 
       case 'error':
@@ -356,8 +442,19 @@ export class FormAgent extends EventEmitter {
         this.emit('speaking', true);
         return;
 
-      case 'response.output_audio.delta':
-        return this.emit('audio', Buffer.from(e.delta, 'base64'));
+      case 'response.output_item.added':
+        this.audio = { itemId: e.item?.id, firstAt: 0, bytes: 0 };
+        return;
+
+      case 'response.output_audio.delta': {
+        if (e.item_id && e.item_id === this.truncatedItem) return;   // stale, cut already
+        const buf = Buffer.from(e.delta, 'base64');
+        if (this.audio) {
+          if (!this.audio.firstAt) this.audio.firstAt = Date.now();
+          this.audio.bytes += buf.length;
+        }
+        return this.emit('audio', buf);
+      }
 
       case 'response.done':
         this.speaking = false;
@@ -365,12 +462,6 @@ export class FormAgent extends EventEmitter {
         this.emit('speaking', false);
         return this.#onResponseDone(e.response);
     }
-  }
-
-  #greet() {
-    // One nudge to open the conversation. Everything after this is driven by
-    // the visitor speaking.
-    this.#requestResponse();
   }
 
   async #onResponseDone(response) {
@@ -436,22 +527,14 @@ export class FormAgent extends EventEmitter {
       };
     }
 
-    if (name === 'start_registration') {
-      const open = [...this.registrations.values()].filter((r) => r.status === 'open');
-      if (open.length >= this.maxOpen) {
-        return { ok: false, error: `too many open registrations (limit ${this.maxOpen})` };
-      }
-      const reg = this.#open({ label: String(args.label || '').trim() });
-      this.#publish(reg);
-      return { registration: reg.id, label: this.#labelOf(reg) };
-    }
-
     // Everything below is about one specific person.
     const reg = this.#resolve(args.registration);
     if (!reg) {
       return {
         ok: false,
-        error: `unknown registration ${args.registration ?? '(missing)'}`,
+        error: this.registrations.size
+          ? `unknown registration ${args.registration ?? '(missing)'}`
+          : 'nobody has arrived at reception yet',
         valid: [...this.registrations.values()]
           .filter((r) => r.status === 'open')
           .map((r) => ({ id: r.id, label: this.#labelOf(r) })),

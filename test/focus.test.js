@@ -10,13 +10,21 @@ import { FormAgent } from '../src/agent.js';
 import { FormState } from '../src/form-state.js';
 import { buildBoard } from '../src/prompt.js';
 
-function harness(opts = {}) {
+function harness({ arrive = [''], ...opts } = {}) {
   const agent = new FormAgent({ form: visit, mode: 'text', apiKey: 'test-key', ...opts });
-  agent.ws = { readyState: 1, send: () => {} };
+  const sent = [];
+  agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
+  agent.handleEvent({ type: 'session.updated' });
+
+  // Registrations only exist because the room says a person does.
+  if (arrive.length) agent.roomUpdate({ arrived: arrive.map((label) => ({
+    origin: label ? 'known' : 'unknown', personKey: label || null,
+    label: label || '', prefill: {}, notes: '',
+  })) });
+
   let n = 0;
   const call = async (name, args = {}) => {
-    const sent = [];
-    agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
+    sent.length = 0;
     agent.handleEvent({
       type: 'response.done',
       response: {
@@ -24,22 +32,22 @@ function harness(opts = {}) {
         output: [{ type: 'function_call', name, call_id: `c${n}`, arguments: JSON.stringify(args) }],
       },
     });
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 10));      // the tool loop is async
     const out = sent.find((e) => e.item?.type === 'function_call_output');
     return out ? JSON.parse(out.item.output) : null;
   };
-  return { agent, call };
+
+  return { agent, call, sent };
 }
 
 describe('focus', () => {
-  test('starts on r1 without anyone asking', () => {
+  test('lands on the first person through the door', () => {
     const { agent } = harness();
     assert.equal(agent.focused, 'r1');
   });
 
   test('focus moves it and reports what that person needs', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     const r = await call('focus', { registration: 'r2' });
 
     assert.equal(agent.focused, 'r2');
@@ -55,8 +63,7 @@ describe('focus', () => {
   });
 
   test('a save without an id goes to whoever is focused', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('focus', { registration: 'r2' });
     const r = await call('save_fields', { fields: { procedencia: 'Lala' } });
 
@@ -65,8 +72,7 @@ describe('focus', () => {
   });
 
   test('closing the focused registration moves focus to another open one', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('close_registration', { registration: 'r1', reason: 'se fue' });
     assert.equal(agent.focused, 'r2');
   });
@@ -83,8 +89,7 @@ describe('cross-attribution', () => {
   });
 
   test('saving to someone else records who was being addressed', async () => {
-    const { agent, call } = harness();
-    await call('start_registration', { label: 'Ana Ruiz' });
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('focus', { registration: 'r2' });
     // Agent is talking to Ana but writes onto Víctor's form.
     await call('save_fields', { registration: 'r1', fields: { procedencia: 'Lala' }, quotes: { procedencia: 'vengo de Lala' } });
@@ -96,9 +101,8 @@ describe('cross-attribution', () => {
   });
 
   test('a shared answer saved to both people flags only the off-focus one', async () => {
-    const { agent, call } = harness();
+    const { agent, call } = harness({ arrive: ['', 'Ana Ruiz'] });
     await call('save_fields', { registration: 'r1', fields: { visitante: 'Víctor Dávalos' } });
-    await call('start_registration', { label: 'Ana Ruiz' });
     // One spoken answer, written to both people; focus never left Víctor.
     await call('save_fields', { registration: 'r1', fields: { motivo: 'junta' } });
     await call('save_fields', { registration: 'r2', fields: { motivo: 'junta' } });

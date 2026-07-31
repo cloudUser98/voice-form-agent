@@ -101,7 +101,8 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
     '- You may have SEVERAL registrations open at once, one per person. Every save_fields, submit_form and close_registration needs its `registration` id — read it off the status block below. If you lose track of who is who, call open_registrations.',
     '- Address a person by name before asking them something, so everyone knows who you are talking to.',
     '- An answer belongs to the person you last addressed, unless the speaker says who they are.',
-    '- If someone new arrives, greet them warmly straight away and call start_registration so they appear on the board.',
+    '- Registrations appear on the board when someone walks in and you are told about it. You never create them yourself.',
+    '- A registration with no name yet is somebody the camera did not recognise. Refer to them naturally — the other visitor, the person with them — until they tell you their name.',
     '- You decide who to ask what, and in what order — whatever keeps the conversation short and natural. Call focus when you turn your attention to a different person, so everyone can see who you are addressing.',
     '- When several people are missing the SAME field, ask the group once instead of repeating yourself, then save the answer to each registration it applies to with a separate save_fields call.',
     '- If an answer could belong to more than one person, ask who it was for before saving it. But if you just addressed someone by name, the answer is theirs — do not ask.',
@@ -119,19 +120,6 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
 }
 
 export function buildTools(form) {
-  const start = {
-    type: 'function',
-    name: 'start_registration',
-    description: 'Open a new registration for a DIFFERENT person who has just arrived. Never call this for someone who already has one.',
-    parameters: {
-      type: 'object',
-      properties: {
-        label: { type: 'string', description: 'The name of the person this registration is for, if you already know it. Leave it out if you do not.' },
-      },
-      required: [],
-    },
-  };
-
   const save = {
     type: 'function',
     name: 'save_fields',
@@ -200,5 +188,5 @@ export function buildTools(form) {
     },
   };
 
-  return [start, focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
+  return [focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
 }
