@@ -8,12 +8,15 @@
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'detected', event}   a raw snapshot, if the client owns the camera
 //   server -> {type:'waiting'}   armed; nobody is in the room yet
+//   server -> {type:'ended'}     everyone was dealt with; back to waiting
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'speaking'|'flush'|'done'|'error'}
 //   server -> {type:'debug', entry}   every event, when start asked for it
 //
 // `start` only arms the session. The realtime connection is opened by the
 // first person the camera reports, so a kiosk facing an empty lobby overnight
-// holds no session at all.
+// holds no session at all — and once the last person has been registered the
+// agent ends, putting the kiosk back in exactly that state. This connection
+// outlives any number of agents.
 import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { FormAgent } from './agent.js';
@@ -51,6 +54,7 @@ wss.on('connection', (ws) => {
       try {
         config = {
           form: await loadForm(msg.form),
+          name: msg.form,
           mode: msg.mode === 'text' ? 'text' : 'audio',
           notes: msg.notes || '',
           debug: !!msg.debug,
@@ -107,7 +111,21 @@ wss.on('connection', (ws) => {
     a.on('flush', () => say({ type: 'flush' }));
     a.on('done', (d) => say({ type: 'done', ...d }));
     a.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
-    a.on('close', () => ws.close());
+
+    // Everyone was dealt with. Drop the agent and go back to how the kiosk
+    // started: armed, holding no session, waiting for the next arrival to
+    // build a fresh one. Clearing `agent` first is also what tells the close
+    // handler below that this was deliberate.
+    a.on('ended', ({ session }) => {
+      agent = null;
+      say({ type: 'ended', session });
+      say({ type: 'waiting', form: config.name });
+    });
+
+    // A socket that dies while the agent is still the live one is a failure,
+    // and the client should hear about it. One that dies after 'ended' is just
+    // the agent hanging up, and must not take the kiosk down with it.
+    a.on('close', () => { if (agent === a) ws.close(); });
     if (config.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
     return a;
   }

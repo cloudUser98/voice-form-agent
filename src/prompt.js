@@ -79,8 +79,10 @@ function whatNext(entries) {
   return open.length
     ? `\n\n  ${open[0].id} (${open[0].label || 'the unidentified visitor'}) is still waiting `
       + 'and has NOT been registered.'
-    : '\n\n  Everyone has been dealt with. Say goodbye in ONE short sentence, '
-      + 'ask nothing else and call no tool.';
+    // The goodbye is a forced beat (agent.js #farewellBeat), not a board line —
+    // asking for it here too is how the last visitor gets told goodbye twice.
+    : '\n\n  Everyone has been dealt with. Say nothing further, ask nothing '
+      + 'and call no tool.';
 }
 
 /**

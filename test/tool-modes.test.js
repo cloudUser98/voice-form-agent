@@ -46,7 +46,13 @@ function fire(agent, name, args, n = 1) {
   });
 }
 
-const beats = (sent) => sent.filter((e) => e.type === 'response.create' && e.response?.tool_choice === 'none');
+// Forced turns belonging to the tool flow — a cover sentence or an
+// interjection. Submitting the only registration also ends the session, and
+// that goodbye is a forced turn too; it has its own file and is not what any
+// test here is counting.
+const beats = (sent) => sent.filter((e) => e.type === 'response.create'
+  && e.response?.tool_choice === 'none'
+  && !/last thing you say/.test(e.response.instructions || ''));
 const outputs = (sent) => sent.filter((e) => e.item?.type === 'function_call_output')
   .map((e) => JSON.parse(e.item.output));
 const systemNotes = (sent) => sent

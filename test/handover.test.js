@@ -79,12 +79,26 @@ describe('handing over to whoever is next', () => {
     assert.match(said, /visitante|procedencia/, 'names something concrete to ask for');
   });
 
-  // Otherwise the agent turns to an empty room and keeps talking.
-  test('finishing the last one forces nothing', async () => {
+  // The old contract here was "forces nothing", which left the last visitor to
+  // be dismissed by a board line the model could answer with a tool call. It is
+  // now the same forced turn everyone else gets — one sentence, and it ends.
+  test('finishing the last one forces a goodbye', async () => {
     const { call } = harness({ arrive: [''] });
     await call(['save_fields', { registration: 'r1', fields: FULL }]);
     const create = await call(['submit_form', { registration: 'r1' }]);
-    assert.equal(create.response, undefined, 'no forced beat with nobody waiting');
+
+    assert.equal(create.response?.tool_choice, 'none', 'it must speak, not reach for a tool');
+    const said = create.response.instructions;
+    assert.match(said, /Say goodbye/, 'it should be a farewell');
+    assert.match(said, /nobody else waiting/, 'and it should know the room is empty');
+    assert.doesNotMatch(said, /Ask them for/, 'it must not ask for anything more');
+  });
+
+  test('it names the person it is saying goodbye to', async () => {
+    const { call } = harness({ arrive: ['Ana Ruiz'] });
+    await call(['save_fields', { registration: 'r1', fields: { ...FULL, visitante: 'Ana Ruiz' } }]);
+    const create = await call(['submit_form', { registration: 'r1' }]);
+    assert.match(create.response.instructions, /Ana Ruiz/);
   });
 
   test('if the next person is already complete, hand over to their confirmation', async () => {

@@ -260,6 +260,9 @@ $('go').onclick = async () => {
     if (e.type === 'flush') stopPlayback();      // cut short to acknowledge the room
     if (e.type === 'debug') logEvent(e.entry);
     if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
+    // The session ended, the connection did not. The board belongs to the
+    // agent that just closed, so it goes with it.
+    if (e.type === 'ended') { $('status').textContent = `session ${e.session} ended — everyone was registered`; focusedId = null; openForms.clear(); render({}, ws); }
     if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
   };
 };

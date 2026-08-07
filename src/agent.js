@@ -16,12 +16,16 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  *
  * Events: 'open' | 'audio' (Buffer pcm16) | 'transcript' {role,text}
  *         'state' {data,missing} | 'focus' {registration} | 'idle'
- *         'speaking' bool | 'done' {data}
+ *         'speaking' bool | 'done' {data} | 'ended' {session}
  *         'flush' (drop buffered audio) | 'busy' bool (a tool has the floor)
  *         'debug' (every event) | 'error' | 'close'
  *
  * The conversation is half duplex: the agent never listens while it talks, and
  * is never interrupted.
+ *
+ * It also ends. When the last registration is finished with there is no work
+ * left, so the agent says goodbye and closes its session rather than sitting
+ * on an open socket facing an empty lobby. Whoever arrives next gets a new one.
  */
 export class FormAgent extends EventEmitter {
   constructor({
@@ -59,6 +63,12 @@ export class FormAgent extends EventEmitter {
     this.busy = false;                  // a blocking tool has the floor
     this.audio = null;                  // the response currently being spoken
     this.truncatedItem = null;          // its deltas are stale; drop them
+    this.ending = false;                // the last person is being said goodbye to
+    this.ended = false;                 // ...and that is done; the session is over
+    this.farewellDone = false;          // the goodbye has been asked for once
+    this.pendingFarewell = null;        // ...or is waiting for the floor
+    this.spokenBytes = 0;               // audio streamed for the current response
+    this.spokenAt = 0;                  // when its first chunk went out
     this.opts = { apiKey, model, voice };
     this.trace = openTrace(sessionId, { form: form.name, notes, mode });
   }
@@ -145,6 +155,9 @@ export class FormAgent extends EventEmitter {
    * snapshot produces nothing, so a camera may fire continuously in silence.
    */
   roomUpdate({ arrived = [], departed = [], unidentifiedLeft = 0 } = {}) {
+    // Mid-goodbye this session is spoken for. Somebody walking in now belongs
+    // to the next one, which the server opens as soon as this socket closes.
+    if (this.ending) return;
     if (!this.ready) { this.pendingRoom.push({ arrived, departed, unidentifiedLeft }); return; }
 
     const lines = [];
@@ -184,7 +197,11 @@ export class FormAgent extends EventEmitter {
     this.#interject(lines.join('\n'));
   }
 
-  close() { clearTimeout(this.boardTimer); this.ws?.close(); }
+  close() {
+    clearTimeout(this.boardTimer);
+    clearTimeout(this.endTimer);
+    this.ws?.close?.();
+  }
 
   // ---------------------------------------------------------------- internals
 
@@ -382,6 +399,83 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
+   * The mirror image of #handoverBeat: that one fires when somebody is still
+   * waiting, this one when nobody is.
+   *
+   * Forced for the same reason the read-back is. The board does say everyone
+   * has been dealt with, but a board is a description — the model can answer it
+   * by reaching for a tool and the last visitor walks away in silence. With
+   * tool_choice 'none' the only thing this turn can be is the goodbye.
+   */
+  #farewellBeat(finished) {
+    const who = this.#labelOf(finished);
+    return this.#beat(
+      `You have just finished with ${who || 'the visitor'}, and there is nobody else waiting. `
+      + `Say goodbye${who ? ` to ${who}` : ''} warmly in ONE short sentence. `
+      + 'Ask nothing, offer nothing and add nothing else — this is the last thing you say.');
+  }
+
+  /**
+   * Nobody is left to register. A receptionist with an empty lobby does not
+   * stand at the desk waiting to be spoken to, and neither does this: the
+   * session closes and the next arrival opens a fresh one.
+   *
+   * A submitted registration earns the goodbye. A closed one does not — it was
+   * abandoned, usually because the person walked off, and there is nobody
+   * standing there to hear it.
+   */
+  #endSession(finished) {
+    this.ending = true;
+    if (finished.status !== 'submitted') return this.#finish();
+    this.pendingFarewell = finished;
+    this.#sayFarewell();
+  }
+
+  /**
+   * Ask for the goodbye, once the floor is free.
+   *
+   * It usually is. But a slow submit tool covers its own wait with "un
+   * momento", and that response is still in flight when the form comes back
+   * submitted — #requestResponse would quietly queue the farewell behind it and
+   * the session would close on the cover sentence, saying goodbye to nobody.
+   * So it waits instead, and the turn that frees the floor plays it.
+   */
+  #sayFarewell() {
+    if (!this.pendingFarewell || this.responsePending) return false;
+    const finished = this.pendingFarewell;
+    this.pendingFarewell = null;
+    this.farewellDone = true;
+    this.#requestResponse(this.#farewellBeat(finished));
+    return true;
+  }
+
+  /**
+   * Hang up — but not before the goodbye has actually been heard.
+   *
+   * The server generates audio faster than it plays, so `response.done` means
+   * "finished generating", not "finished speaking"; closing on it clips the
+   * last words off. There is no server event for playback either — the one that
+   * tracks it, output_audio_buffer.stopped, exists only on WebRTC and SIP, and
+   * this is a raw WebSocket. So we wait out the exact duration of what we
+   * streamed, which we already count for the same reason #cutOff does.
+   *
+   * In text mode nothing was spoken, so this is immediate.
+   */
+  #finish() {
+    if (this.ended) return;
+    this.ended = true;
+
+    const generatedMs = (this.spokenBytes / (24000 * 2)) * 1000;   // pcm16 mono @24k
+    const remaining = this.spokenAt ? (this.spokenAt + generatedMs) - Date.now() : 0;
+
+    this.endTimer = setTimeout(() => {
+      this.trace.write({ dir: 'agent', type: 'session.ended' });
+      this.emit('ended', { session: this.sessionId });
+      this.close();
+    }, Math.max(0, remaining));
+  }
+
+  /**
    * Run a tool the way it was decorated.
    *
    * Undecorated and `blocking` are both awaited, so callers get a real result
@@ -554,6 +648,10 @@ export class FormAgent extends EventEmitter {
 
       case 'response.created':
         this.speaking = true;
+        // Counted per response, not per item: the goodbye is measured to know
+        // when it has finished playing.
+        this.spokenBytes = 0;
+        this.spokenAt = 0;
         this.emit('speaking', true);
         return;
 
@@ -568,6 +666,8 @@ export class FormAgent extends EventEmitter {
           if (!this.audio.firstAt) this.audio.firstAt = Date.now();
           this.audio.bytes += buf.length;
         }
+        if (!this.spokenAt) this.spokenAt = Date.now();
+        this.spokenBytes += buf.length;
         return this.emit('audio', buf);
       }
 
@@ -589,6 +689,10 @@ export class FormAgent extends EventEmitter {
         if (text) this.emit('transcript', { role: 'agent', text });
       }
     }
+
+    // The session is on its way out: either that turn was the goodbye, or it
+    // was something holding the floor that the goodbye has been waiting for.
+    if (this.ending) return void (this.#sayFarewell() || this.#finish());
 
     const calls = (response?.output || []).filter((i) => i.type === 'function_call');
     if (!calls.length) {
@@ -626,6 +730,8 @@ export class FormAgent extends EventEmitter {
     if (justFinished) {
       const beat = this.#handoverBeat(justFinished);
       if (beat) return this.#requestResponse(beat);
+      // No beat means nobody is waiting: that was the last person in the room.
+      return this.#endSession(justFinished);
     }
 
     // Whichever registration just became complete gets its forced beat.
