@@ -46,27 +46,27 @@ export function toPerson(person, form) {
  * strangers in the room means two registrations, and if the count drops we know
  * somebody left but not which one.
  */
-export function planFromSnapshot(event, form, registrations) {
-  if (!event || event.type !== 'people_detected') {
-    return { arrived: [], departed: [], unidentifiedLeft: 0 };
-  }
+ export function planFromSnapshot(event, form, registrations) {
+     if (!event || event.type !== 'people_detected') {
+         return { arrived: [], departed: [], unidentifiedLeft: 0 };
+     }
 
-  const all = [...registrations.values()];
-  const seen = (event.conocidos || []).map((p) => toPerson(p, form));
-  const strangers = (event.desconocidos || []).length;
+     const all = [...registrations.values()];
+     const seen = (event.conocidos || []).map((p) => toPerson(p, form));
+     const strangers = (event.desconocidos || []).length;
 
-  const heldKnown = all.filter((r) => r.status === 'open' && r.origin === 'known');
-  const heldUnknown = all.filter((r) => r.status === 'open' && r.origin === 'unknown');
+     const heldKnown = all.filter((r) => r.status === 'open' && r.origin === 'known');
+     const heldUnknown = all.filter((r) => r.status === 'open' && r.origin === 'unknown');
 
-  return {
-    arrived: [
-      ...seen.filter((p) => !all.some((r) => r.personKey && r.personKey === p.personKey)),
-      ...Array.from(
-        { length: Math.max(0, strangers - heldUnknown.length) },
-        () => ({ origin: 'unknown', personKey: null, label: '', prefill: {}, notes: '' }),
-      ),
-    ],
-    departed: heldKnown.filter((r) => !seen.some((p) => p.personKey === r.personKey)),
-    unidentifiedLeft: Math.max(0, heldUnknown.length - strangers),
-  };
-}
+     return {
+         arrived: [
+             ...seen.filter((p) => !all.some((r) => r.personKey && r.personKey === p.personKey)),
+             ...Array.from(
+                 { length: Math.max(0, strangers - heldUnknown.length) },
+                 () => ({ origin: 'unknown', personKey: null, label: '', prefill: {}, notes: '' }),
+             ),
+         ],
+         departed: heldKnown.filter((r) => !seen.some((p) => p.personKey === r.personKey)),
+         unidentifiedLeft: Math.max(0, heldUnknown.length - strangers),
+     };
+ }

@@ -154,48 +154,56 @@ export class FormAgent extends EventEmitter {
    * in together is greeted once rather than once per person. An identical
    * snapshot produces nothing, so a camera may fire continuously in silence.
    */
-  roomUpdate({ arrived = [], departed = [], unidentifiedLeft = 0 } = {}) {
-    // Mid-goodbye this session is spoken for. Somebody walking in now belongs
-    // to the next one, which the server opens as soon as this socket closes.
-    if (this.ending) return;
-    if (!this.ready) { this.pendingRoom.push({ arrived, departed, unidentifiedLeft }); return; }
+   roomUpdate({ arrived = [], departed = [], unidentifiedLeft = 0 } = {}) {
+       // Mid-goodbye this session is spoken for. Somebody walking in now belongs
+       // to the next one, which the server opens as soon as this socket closes.
+       if (this.ending) return;
+       if (!this.ready) {
+           this.pendingRoom.push({ arrived, departed, unidentifiedLeft });
+           
+           return;
+       }
 
-    const lines = [];
+       const lines = [];
 
-    for (const person of arrived) {
-      const open = [...this.registrations.values()].filter((r) => r.status === 'open');
-      if (open.length >= this.maxOpen) break;        // a camera glitch cannot flood us
-      const reg = this.#open(person);
-      if (!this.focused) this.focused = reg.id;
-      this.#publish(reg);
-      lines.push(`- ${reg.id}: ${this.#labelOf(reg) || 'not identified by the camera'}`
-        + (person.notes ? ` (${person.notes})` : ''));
-    }
+       for (const person of arrived) {
+           const open = [...this.registrations.values()].filter((r) => r.status === 'open');
+           // NOTE: What is maxOpen???
+           if (open.length >= this.maxOpen) break;        // a camera glitch cannot flood us
+           
+           const reg = this.#open(person);
+           if (!this.focused) this.focused = reg.id; // Focus
+           this.#publish(reg);
 
-    if (arrived.length) {
-      const first = !this.greeted;
-      this.greeted = true;
-      lines.unshift(first
-        ? `${arrived.length > 1 ? 'People have' : 'Someone has'} walked up to reception:`
-        : `${arrived.length > 1 ? 'More people have' : 'Someone else has'} arrived:`);
-      lines.push(arrived.length > 1
-        ? 'Greet them together in ONE short sentence, then get on with it.'
-        : 'Greet them briefly, then get on with it.');
-    }
+           let line = `- ${reg.id}: ${this.#labelOf(reg) || 'not identified by the camera'}`;
+           line = line + (person.notes ? ` (${person.notes})` : '');
+           lines.push(line);
+       }
 
-    for (const reg of departed) {
-      lines.push(`${this.#labelOf(reg) || reg.id} has left. Registration ${reg.id} is unfinished — `
-        + 'ask whether to carry on with it, and call close_registration if not.');
-    }
+       if (arrived.length) {
+           const first = !this.greeted;
+           this.greeted = true;
+           lines.unshift(first
+               ? `${arrived.length > 1 ? 'People have' : 'Someone has'} walked up to reception:`
+               : `${arrived.length > 1 ? 'More people have' : 'Someone else has'} arrived:`);
+           lines.push(arrived.length > 1
+               ? 'Greet them together in ONE short sentence, then get on with it.'
+               : 'Greet them briefly, then get on with it.');
+       }
 
-    if (unidentifiedLeft) {
-      lines.push(`${unidentifiedLeft} unidentified visitor(s) left and the camera cannot say which. `
-        + 'Ask who is still here before closing anything.');
-    }
+       for (const reg of departed) {
+           lines.push(`${this.#labelOf(reg) || reg.id} has left. Registration ${reg.id} is unfinished — `
+               + 'ask whether to carry on with it, and call close_registration if not.');
+       }
 
-    if (!lines.length) return;                 // same people as before: stay quiet
-    this.#interject(lines.join('\n'));
-  }
+       if (unidentifiedLeft) {
+           lines.push(`${unidentifiedLeft} unidentified visitor(s) left and the camera cannot say which. `
+               + 'Ask who is still here before closing anything.');
+       }
+
+       if (!lines.length) return;                 // same people as before: stay quiet
+       this.#interject(lines.join('\n'));
+   }
 
   close() {
     clearTimeout(this.boardTimer);
@@ -235,20 +243,20 @@ export class FormAgent extends EventEmitter {
 
   /** Create a registration. Only ever called from roomUpdate. */
   #open({ label = '', prefill = {}, origin = 'unknown', personKey = null } = {}) {
-    const id = `r${this.nextId++}`;
-    const reg = {
-      id,
-      label,
-      origin,
-      personKey,
-      state: new FormState(this.form.schema, { prefill, label }),
-      status: 'open',
-      result: null,
-      beatDone: false,
-      verified: new Map(),              // field -> the exact value that passed
-    };
-    this.registrations.set(id, reg);
-    return reg;
+      const id = `r${this.nextId++}`; // Creates an ID like r1, r2, rn...
+      const reg = {
+          id,
+          label,
+          origin,
+          personKey,
+          state: new FormState(this.form.schema, { prefill, label }),
+          status: 'open',
+          result: null,
+          beatDone: false,
+          verified: new Map(),              // field -> the exact value that passed
+      };
+      this.registrations.set(id, reg);
+      return reg;
   }
 
   /**
@@ -266,18 +274,20 @@ export class FormAgent extends EventEmitter {
 
   /** The name to show and to call the person by. */
   #labelOf(reg) {
-    return reg.label || reg.state.data[this.form.labelFrom] || '';
+      return reg.label || reg.state.data[this.form.labelFrom] || '';
   }
 
   #publish(reg) {
-    // A correction that empties a required field earns a fresh confirmation.
-    if (!reg.state.complete) reg.beatDone = false;
-    this.emit('state', {
-      registration: reg.id,
-      label: this.#labelOf(reg),
-      ...reg.state.snapshot(),
-    });
-    this.#scheduleBoard();
+      // A correction that empties a required field earns a fresh confirmation.
+      // NOTE: How a registration can be "completed" if it was just created?
+      if (!reg.state.complete) reg.beatDone = false;
+      // NOTE: What does emiting this event do?
+      this.emit('state', {
+          registration: reg.id,
+          label: this.#labelOf(reg), // NOTE: Why is this not a Registration method?
+          ...reg.state.snapshot(),
+      });
+      this.#scheduleBoard();
   }
 
   /**
@@ -574,13 +584,14 @@ export class FormAgent extends EventEmitter {
    * out-of-band changes (a staff correction) are debounced and never land in
    * the middle of a response.
    */
-  #scheduleBoard() {
-    clearTimeout(this.boardTimer);
-    this.boardTimer = setTimeout(() => {
-      if (this.speaking) return this.#scheduleBoard();
-      this.#flushBoard();
-    }, 250);
-  }
+   #scheduleBoard() {
+       clearTimeout(this.boardTimer); // NOTE: WHAT IS A TIMER DOING HERE???
+       // NOTE: ANOTHER TIMER?!
+       this.boardTimer = setTimeout(() => {
+           if (this.speaking) return this.#scheduleBoard();
+           this.#flushBoard();
+       }, 250);
+   }
 
   /**
    * Push it right now. Used after tool calls, where the board MUST be current

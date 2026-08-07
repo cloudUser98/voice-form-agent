@@ -2,30 +2,160 @@
 <meta charset="utf-8">
 <title>voice-form-agent</title>
 <style>
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 78rem; margin: 1.5rem auto; padding: 0 1rem; }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
-  @media (max-width: 60rem) { .cols { grid-template-columns: 1fr; } }
-  #events { height: 26rem; overflow-y: auto; background: #0f1115; color: #cbd5e1; border-radius: 6px;
-            padding: .5rem .6rem; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  #events div { white-space: pre-wrap; word-break: break-word; padding: 1px 0; cursor: pointer; }
-  .d-openai { color: #7dd3fc; } .d-tool { color: #fca5a5; } .d-room { color: #fcd34d; }
-  .d-openai.minor { color: #64748b; }
-  .mic-on { color: #0a5; font-weight: 600; } .mic-off { color: #a60; font-weight: 600; }
-  button { font: inherit; padding: .5rem 1rem; }
-  #log p { margin: .4rem 0; } .user { color: #444; } .agent { color: #0a5; }
-  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
-  th { font-size: .8rem; text-transform: uppercase; color: #888; font-weight: 600; }
-  .val { cursor: pointer; font-weight: 600; } .val:hover { background: #ffe; }
-  .quote { color: #666; font-style: italic; }
-  .tag { font-size: .72rem; padding: .1rem .4rem; border-radius: 3px; white-space: nowrap; }
-  .heard { background: #dff5e3; color: #096; }
-  .inferred, .prefill { background: #ffe9c7; color: #a60; }
-  .corrected { background: #e2e8ff; color: #33a; }
-  .cross { background: #ffe0e0; color: #b00; }
-  .focused { color: #0a5; }
-  .missing td { color: #bbb; }
-  h3 { margin: 1.4rem 0 .2rem; font-size: .95rem; color: #333; }
+  body {
+      font: 15px/1.5 system-ui, sans-serif;
+      max-width: 78rem;
+      margin: 1.5rem auto;
+      padding: 0 1rem;
+  }
+  
+  .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+      align-items: start;
+  }
+  
+  @media (max-width: 60rem) {
+      .cols {
+          grid-template-columns: 1fr;
+      }
+  }
+  
+  #events {
+      height: 26rem;
+      overflow-y: auto;
+      background: #0f1115;
+      color: #cbd5e1;
+      border-radius: 6px;
+      padding: .5rem .6rem;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  
+  #events div {
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 1px 0;
+      cursor: pointer;
+  }
+  
+  .d-openai {
+      color: #7dd3fc;
+  }
+  
+  .d-tool {
+      color: #fca5a5;
+  }
+  
+  .d-room {
+      color: #fcd34d;
+  }
+  
+  .d-openai.minor {
+      color: #64748b;
+  }
+  
+  .mic-on {
+      color: #0a5;
+      font-weight: 600;
+  }
+  
+  .mic-off {
+      color: #a60;
+      font-weight: 600;
+  }
+  
+  button {
+      font: inherit;
+      padding: .5rem 1rem;
+  }
+  
+  #log p {
+      margin: .4rem 0;
+  }
+  
+  .user {
+      color: #444;
+  }
+  
+  .agent {
+      color: #0a5;
+  }
+  
+  table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1rem;
+  }
+  
+  th, td {
+      text-align: left;
+      padding: .4rem .5rem;
+      border-bottom: 1px solid #eee;
+      vertical-align: top;
+  }
+  
+  th {
+      font-size: .8rem;
+      text-transform: uppercase;
+      color: #888;
+      font-weight: 600;
+  }
+  
+  .val {
+      cursor: pointer;
+      font-weight: 600;
+  }
+  
+  .val:hover {
+      background: #ffe;
+  }
+  
+  .quote {
+      color: #666;
+      font-style: italic;
+  }
+  
+  .tag {
+      font-size: .72rem;
+      padding: .1rem .4rem;
+      border-radius: 3px;
+      white-space: nowrap;
+  }
+  
+  .heard {
+      background: #dff5e3;
+      color: #096;
+  }
+  
+  .inferred, .prefill {
+      background: #ffe9c7;
+      color: #a60;
+  }
+  
+  .corrected {
+      background: #e2e8ff;
+      color: #33a;
+  }
+  
+  .cross {
+      background: #ffe0e0;
+      color: #b00;
+  }
+  
+  .focused {
+      color: #0a5;
+  }
+  
+  .missing td {
+      color: #bbb;
+  }
+  
+  h3 {
+      margin: 1.4rem 0 .2rem;
+      font-size: .95rem;
+      color: #333;
+  }
 </style>
 
 <h1>voice-form-agent</h1>
@@ -170,100 +300,100 @@ $('verbose').onchange = () => {
 };
 
 $('go').onclick = async () => {
-  $('go').disabled = true;
-  $('status').textContent = 'connecting…';
+    $('go').disabled = true;
+    $('status').textContent = 'connecting…';
 
-  const ctx = new AudioContext({ sampleRate: RATE });
+    const ctx = new AudioContext({ sampleRate: RATE });
 
-  // ---- playback: schedule chunks back to back on one moving cursor --------
-  let cursor = 0;
-  const play = (buf) => {
-    const pcm = new Int16Array(buf);
-    const audio = ctx.createBuffer(1, pcm.length, RATE);
-    const ch = audio.getChannelData(0);
-    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-    const src = ctx.createBufferSource();
-    src.buffer = audio;
-    src.connect(ctx.destination);
-    cursor = Math.max(cursor, ctx.currentTime);
-    src.start(cursor);
-    cursor += audio.duration;
-    sources.push(src);
-    src.onended = () => { sources = sources.filter((s) => s !== src); };
-  };
-  // Half duplex. The mic stays shut until the agent has stopped generating AND
-  // the speaker has finished playing what was already buffered — those are
-  // different moments, and reopening at the first one is how a kiosk ends up
-  // transcribing its own voice.
-  let sources = [];
-  const stopPlayback = () => { sources.forEach((s) => { try { s.stop(); } catch {} }); sources = []; cursor = 0; };
-  let generating = false;
-  const micOpen = () => !generating && ctx.currentTime >= cursor - 0.05;
-  const paintMic = () => {
-    const open = micOpen();
-    $('mic').className = open ? 'mic-on' : 'mic-off';
-    $('mic').textContent = open ? 'mic open — your turn' : 'mic closed — agent speaking';
-  };
-  setInterval(paintMic, 100);
+    // ---- playback: schedule chunks back to back on one moving cursor --------
+    let cursor = 0;
+    const play = (buf) => {
+        const pcm = new Int16Array(buf);
+        const audio = ctx.createBuffer(1, pcm.length, RATE);
+        const ch = audio.getChannelData(0);
+        for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+        const src = ctx.createBufferSource();
+        src.buffer = audio;
+        src.connect(ctx.destination);
+        cursor = Math.max(cursor, ctx.currentTime);
+        src.start(cursor);
+        cursor += audio.duration;
+        sources.push(src);
+        src.onended = () => { sources = sources.filter((s) => s !== src); };
+    };
+    // Half duplex. The mic stays shut until the agent has stopped generating AND
+    // the speaker has finished playing what was already buffered — those are
+    // different moments, and reopening at the first one is how a kiosk ends up
+    // transcribing its own voice.
+    let sources = [];
+    const stopPlayback = () => { sources.forEach((s) => { try { s.stop(); } catch {} }); sources = []; cursor = 0; };
+    let generating = false;
+    const micOpen = () => !generating && ctx.currentTime >= cursor - 0.05;
+    const paintMic = () => {
+        const open = micOpen();
+        $('mic').className = open ? 'mic-on' : 'mic-off';
+        $('mic').textContent = open ? 'mic open — your turn' : 'mic closed — agent speaking';
+    };
+    setInterval(paintMic, 100);
 
-  // ---- microphone --------------------------------------------------------
-  const worklet = `class P extends AudioWorkletProcessor{
-    process(inputs){ const c = inputs[0][0]; if (c) this.port.postMessage(c.slice()); return true; }
-  } registerProcessor('tap', P)`;
-  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: 'application/javascript' })));
+    // ---- microphone --------------------------------------------------------
+    const worklet = `class P extends AudioWorkletProcessor{
+        process(inputs){ const c = inputs[0][0]; if (c) this.port.postMessage(c.slice()); return true; }
+        } registerProcessor('tap', P)`;
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: 'application/javascript' })));
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-  const tap = new AudioWorkletNode(ctx, 'tap');
-  ctx.createMediaStreamSource(stream).connect(tap);
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const tap = new AudioWorkletNode(ctx, 'tap');
+    ctx.createMediaStreamSource(stream).connect(tap);
 
-  // ---- protocol ----------------------------------------------------------
-  // The socket is opened only now, after every await above. Opening it earlier
-  // races the microphone permission prompt: the socket connects first, onopen
-  // is assigned too late to ever fire, and the session never starts.
-  const host = location.hostname || 'localhost';   // also works from file://
-  const ws = new WebSocket(`ws://${host}:8787`);
-  ws.binaryType = 'arraybuffer';
+    // ---- protocol ----------------------------------------------------------
+    // The socket is opened only now, after every await above. Opening it earlier
+    // races the microphone permission prompt: the socket connects first, onopen
+    // is assigned too late to ever fire, and the session never starts.
+    const host = location.hostname || 'localhost';   // also works from file://
+    const ws = new WebSocket(`ws://${host}:8787`);
+    ws.binaryType = 'arraybuffer';
 
-  tap.port.onmessage = (e) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (!micOpen()) return;                    // never listen to ourselves
-    const f32 = e.data;
-    const pcm = new Int16Array(f32.length);
-    for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
-    ws.send(pcm.buffer);
-  };
+    tap.port.onmessage = (e) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        if (!micOpen()) return;                    // never listen to ourselves
+        const f32 = e.data;
+        const pcm = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
+        ws.send(pcm.buffer);
+    };
 
-  // No detector running? Fake a snapshot so the agent wakes up.
-  const room = { type: 'people_detected', conocidos: [], desconocidos: [] };
-  $('arrive').disabled = false;
-  $('arrive').onclick = () => {
-    room.desconocidos.push({});
-    room.total = room.conocidos.length + room.desconocidos.length;
-    ws.send(JSON.stringify({ type: 'detected', event: room }));
-  };
+    // No detector running? Fake a snapshot so the agent wakes up.
+    const room = { type: 'people_detected', conocidos: [], desconocidos: [] };
+    $('arrive').disabled = false;
+    $('arrive').onclick = () => {
+        room.desconocidos.push({});
+        room.total = room.conocidos.length + room.desconocidos.length;
+        ws.send(JSON.stringify({ type: 'detected', event: room }));
+    };
 
-  ws.onopen = () => { $('status').textContent = 'waiting for someone to arrive…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
-  ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
-  ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
+    ws.onopen = () => { $('status').textContent = 'waiting for someone to arrive…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
+    ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
+    ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
 
-  ws.onmessage = (ev) => {
-    if (ev.data instanceof ArrayBuffer) return play(ev.data);
-    const e = JSON.parse(ev.data);
-    if (e.type === 'waiting') $('status').textContent = 'armed — waiting for someone to arrive';
-    if (e.type === 'ready') $('status').textContent = 'listening';
-    if (e.type === 'transcript') log(e.role, e.text);
-    if (e.type === 'state') render(e, ws);
-    if (e.type === 'speaking') { generating = e.on; paintMic(); }
-    if (e.type === 'focus') { focusedId = e.registration; render({}, ws); }
-    if (e.type === 'flush') stopPlayback();      // cut short to acknowledge the room
-    if (e.type === 'debug') logEvent(e.entry);
-    if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
-    // The session ended, the connection did not. The board belongs to the
-    // agent that just closed, so it goes with it.
-    if (e.type === 'ended') { $('status').textContent = `session ${e.session} ended — everyone was registered`; focusedId = null; openForms.clear(); render({}, ws); }
-    if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
-  };
+    ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) return play(ev.data);
+        const e = JSON.parse(ev.data);
+        if (e.type === 'waiting') $('status').textContent = 'armed — waiting for someone to arrive';
+        if (e.type === 'ready') $('status').textContent = 'listening';
+        if (e.type === 'transcript') log(e.role, e.text);
+        if (e.type === 'state') render(e, ws);
+        if (e.type === 'speaking') { generating = e.on; paintMic(); }
+        if (e.type === 'focus') { focusedId = e.registration; render({}, ws); }
+        if (e.type === 'flush') stopPlayback();      // cut short to acknowledge the room
+        if (e.type === 'debug') logEvent(e.entry);
+        if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
+        // The session ended, the connection did not. The board belongs to the
+        // agent that just closed, so it goes with it.
+        if (e.type === 'ended') { $('status').textContent = `session ${e.session} ended — everyone was registered`; focusedId = null; openForms.clear(); render({}, ws); }
+        if (e.type === 'error') $('status').textContent = '⚠️ ' + e.error;
+    };
 };
 </script>

@@ -26,122 +26,146 @@ const PORT = Number(process.env.PORT || 8787);
 const FORMS = new Map();
 
 async function loadForm(name) {
-  if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('bad form name');
-  if (!FORMS.has(name)) {
-    const mod = await import(new URL(`../forms/${name}.js`, import.meta.url));
-    FORMS.set(name, mod.default);
-  }
-  return FORMS.get(name);
+    if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('bad form name');
+    if (!FORMS.has(name)) {
+        const mod = await import(new URL(`../forms/${name}.js`, import.meta.url));
+        FORMS.set(name, mod.default);
+    }
+    return FORMS.get(name);
 }
 
 const wss = new WebSocketServer({ port: PORT });
 console.log(`voice-form-agent listening on ws://localhost:${PORT}`);
 
 wss.on('connection', (ws) => {
-  let agent = null;
-  let config = null;                  // what to build once somebody shows up
-  let detector = null;
-  const say = (obj) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
+    let agent = null;
+    let config = null;                  // what to build once somebody shows up
+    let detector = null;
+    
+    const say = (obj) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
 
-  ws.on('message', async (data, isBinary) => {
-    if (isBinary) return agent?.sendAudio(data);
+    ws.on('message', async (data, isBinary) => {
+        // If user audio send it to the agent
+        if (isBinary) return agent?.sendAudio(data);
 
-    let msg;
-    try { msg = JSON.parse(data); } catch { return say({ type: 'error', error: 'invalid json' }); }
+        let msg;
+        try {
+            msg = JSON.parse(data);
+        } catch {
+            return say({ type: 'error', error: 'invalid json' });
+        }
 
-    if (msg.type === 'start') {
-      if (config) return say({ type: 'error', error: 'already started' });
-      try {
-        config = {
-          form: await loadForm(msg.form),
-          name: msg.form,
-          mode: msg.mode === 'text' ? 'text' : 'audio',
-          notes: msg.notes || '',
-          debug: !!msg.debug,
-        };
-      } catch (err) {
-        return say({ type: 'error', error: String(err.message || err) });
-      }
-      watchDetector();
-      return say({ type: 'waiting', form: msg.form });
-    }
+        if (msg.type === 'start') {
+            // NOTE: Check if this validation is correct
+            if (config) return say({ type: 'error', error: 'already started' });
+            try {
+                config = {
+                    form:  await loadForm(msg.form), // Visit or Hostpital... for now...
+                    name:  msg.form,
+                    mode:  msg.mode === 'text' ? 'text' : 'audio',
+                    notes: msg.notes || '', // NOTE: Check how this works
+                    debug: !!msg.debug,
+                };
+            } catch (err) {
+                return say({ type: 'error', error: String(err.message || err) });
+            }
+            watchDetector();
+            return say({ type: 'waiting', form: msg.form });
+        }
 
-    // A raw snapshot forwarded by a client that owns the camera itself. Allowed
-    // before an agent exists — it is the thing that creates one.
-    if (msg.type === 'detected') return feed(msg.event);
+        // A raw snapshot forwarded by a client that owns the camera itself. Allowed
+        // before an agent exists — it is the thing that creates one.
+        if (msg.type === 'detected') return anaunceDetection(msg.event);
 
-    if (!agent) return say({ type: 'error', error: 'nobody has arrived at reception yet' });
-    if (msg.type === 'text') return agent.sendText(msg.text);
-    if (msg.type === 'correct') {
-      const r = agent.correct(msg.field, msg.value, msg.registration);
-      return r.ok || say({ type: 'error', error: r.error });
-    }
-    say({ type: 'error', error: `unknown message ${msg.type}` });
-  });
-
-  /**
-   * Raw detector snapshot in, agent instructions out — and the session itself
-   * if this is the first person through the door. An empty room never opens one.
-   */
-  function feed(event) {
-    if (!config) return;
-    say({ type: 'detected', event });                 // straight into the inspector
-
-    const plan = planFromSnapshot(event, config.form, agent ? agent.registrations : new Map());
-
-    if (!agent) {
-      if (!plan.arrived.length) return;               // nobody there; stay asleep
-      agent = build();
-      agent.start();
-    }
-    // Fires ~400ms before the session is ready; roomUpdate queues it and drains
-    // on session.updated.
-    agent.roomUpdate(plan);
-  }
-
-  function build() {
-    const a = new FormAgent({ form: config.form, notes: config.notes, mode: config.mode });
-    a.on('open', () => say({ type: 'ready', session: a.sessionId, trace: a.trace.file }));
-    a.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
-    a.on('transcript', (m) => say({ type: 'transcript', ...m }));
-    a.on('state', (s) => say({ type: 'state', ...s }));
-    a.on('idle', () => say({ type: 'idle' }));
-    a.on('speaking', (on) => say({ type: 'speaking', on }));
-    a.on('focus', (f) => say({ type: 'focus', ...f }));
-    a.on('flush', () => say({ type: 'flush' }));
-    a.on('done', (d) => say({ type: 'done', ...d }));
-    a.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
-
-    // Everyone was dealt with. Drop the agent and go back to how the kiosk
-    // started: armed, holding no session, waiting for the next arrival to
-    // build a fresh one. Clearing `agent` first is also what tells the close
-    // handler below that this was deliberate.
-    a.on('ended', ({ session }) => {
-      agent = null;
-      say({ type: 'ended', session });
-      say({ type: 'waiting', form: config.name });
+        if (!agent) return say({ type: 'error', error: 'nobody has arrived at reception yet' });
+        if (msg.type === 'text') return agent.sendText(msg.text);
+        if (msg.type === 'correct') {
+            const r = agent.correct(msg.field, msg.value, msg.registration);
+            return r.ok || say({ type: 'error', error: r.error });
+        }
+        say({ type: 'error', error: `unknown message ${msg.type}` });
     });
 
-    // A socket that dies while the agent is still the live one is a failure,
-    // and the client should hear about it. One that dies after 'ended' is just
-    // the agent hanging up, and must not take the kiosk down with it.
-    a.on('close', () => { if (agent === a) ws.close(); });
-    if (config.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
-    return a;
-  }
+    /**
+    * Raw detector snapshot in, agent instructions out — and the session itself
+    * if this is the first person through the door. An empty room never opens one.
+    */
+    // NOTE: Ask what is the advantage of declaring this function on websocket connection
+    function anaunceDetection(event) {
+        // NOTE: Why not validate everything at the start
+        if (!config) return;
+        
+        say({ type: 'detected', event });                 // straight into the inspector
 
-  /**
-   * The camera service is external and may not be running. Its absence must
-   * never take the session down — it just means nobody is announced.
-   */
-  function watchDetector() {
-    const url = process.env.DETECTOR_URL || 'ws://localhost:8765';
-    try {
-      detector = new WebSocket(url);
-      detector.on('message', (raw) => { try { feed(JSON.parse(raw)); } catch { /* not ours */ } });
-      detector.on('error', () => say({ type: 'error', error: `no detector at ${url}` }));
-    } catch { /* nothing to watch */ }
-  }
+        const plan = planFromSnapshot(
+            event,
+            config.form,
+            agent ? agent.registrations : new Map()
+        );
+        
+        if (!plan.arrived.length) return; // No one in sight
 
-  ws.on('close', () => { agent?.close(); detector?.close(); });
+        // NOTE: Isn't it better to build Agent at the start of the connection
+        if (!agent) {
+            agent = build();
+            agent.start();
+        }
+        // Fires ~400ms before the session is ready; roomUpdate queues it and drains
+        // on session.updated.
+        agent.roomUpdate(plan);
+    }
+
+    function build() {
+        const a = new FormAgent({
+            form:  config.form,
+            notes: config.notes,
+            mode:  config.mode
+        });
+        a.on('open', () => say({ type: 'ready', session: a.sessionId, trace: a.trace.file }));
+        a.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
+        a.on('transcript', (m) => say({ type: 'transcript', ...m }));
+        a.on('state', (s) => say({ type: 'state', ...s }));
+        a.on('idle', () => say({ type: 'idle' }));
+        a.on('speaking', (on) => say({ type: 'speaking', on }));
+        a.on('focus', (f) => say({ type: 'focus', ...f }));
+        a.on('flush', () => say({ type: 'flush' }));
+        a.on('done', (d) => say({ type: 'done', ...d }));
+        a.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
+
+        // Everyone was dealt with. Drop the agent and go back to how the kiosk
+        // started: armed, holding no session, waiting for the next arrival to
+        // build a fresh one. Clearing `agent` first is also what tells the close
+        // handler below that this was deliberate.
+        a.on('ended', ({ session }) => {
+            agent = null;
+            say({ type: 'ended', session });
+            say({ type: 'waiting', form: config.name });
+        });
+
+        // A socket that dies while the agent is still the live one is a failure,
+        // and the client should hear about it. One that dies after 'ended' is just
+        // the agent hanging up, and must not take the kiosk down with it.
+        a.on('close', () => { if (agent === a) ws.close(); });
+        if (config.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
+        return a;
+    }
+
+    /**
+    * The camera service is external and may not be running. Its absence must
+    * never take the session down — it just means nobody is announced.
+    */
+    function watchDetector() {
+        const url = process.env.DETECTOR_URL || 'ws://localhost:8765';
+        try {
+            detector = new WebSocket(url);
+            detector.on('message', (raw) => {
+                try {
+                    anaunceDetection(JSON.parse(raw));
+                } catch { /* not ours */ }
+            });
+            detector.on('error', () => say({ type: 'error', error: `no detector at ${url}` }));
+        } catch { /* nothing to watch */ }
+    }
+
+    ws.on('close', () => { agent?.close(); detector?.close(); });
 });
