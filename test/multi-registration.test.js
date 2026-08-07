@@ -9,8 +9,13 @@ import assert from 'node:assert/strict';
 import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
 import { converse } from './helpers.js';
+import { stubHosts } from './hosts-stub.js';
 
-const live = { skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
+// visit's `anfitrion` is checked against the staff directory. Offline, that
+// directory is this list.
+stubHosts();
+
+const live ={ skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
 
 /** An agent with a fake socket, so tool results are readable without a network. */
 function harness({ arrive = [''], ...opts } = {}) {

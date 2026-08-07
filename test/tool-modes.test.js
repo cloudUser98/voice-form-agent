@@ -7,6 +7,11 @@ import assert from 'node:assert/strict';
 import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
 import { blocking, deferred, background, modeOf, withTimeout } from '../src/tools.js';
+import { stubHosts } from './hosts-stub.js';
+
+// visit's `anfitrion` is checked against the staff directory. Offline, that
+// directory is this list.
+stubHosts();
 
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
@@ -221,6 +226,135 @@ describe('deferred and background: she keeps talking', () => {
     net.resolve({ msg: 'listo' });
     await tick(40);
     assert.equal(sent.length, 0, 'fire and forget means forget');
+  });
+});
+
+describe('verify: a value the world has to agree with', () => {
+  const formWithVerify = (verify) => ({
+    ...visit,
+    submit: async () => ({ folio: 'V-9' }),
+    schema: {
+      ...visit.schema,
+      properties: {
+        ...visit.schema.properties,
+        anfitrion: { ...visit.schema.properties.anfitrion, verify },
+      },
+    },
+  });
+
+  const save = (agent, fields, n = 1) => fire(agent, 'save_fields', { registration: 'r1', fields }, n);
+  const state = (agent) => agent.registrations.get('r1').state;
+
+  test('a refused value never lands in the form', async () => {
+    const { agent, sent } = harness(formWithVerify(async () => ({ ok: false, error: 'no existe' })));
+    save(agent, FULL);
+    await tick();
+
+    const out = outputs(sent).at(-1);
+    assert.deepEqual(out.rejected, ['anfitrion: no existe'], 'the reason travels back as a rejection');
+    assert.ok(!out.saved.includes('anfitrion'), 'never report a refused value as saved');
+    assert.ok(out.missing.includes('anfitrion'), 'so the board asks for it again');
+    assert.equal(state(agent).data.anfitrion, undefined);
+    assert.equal(state(agent).evidence.anfitrion, undefined, 'no provenance for a value that is not there');
+    assert.equal(state(agent).data.procedencia, 'Dominos', 'the rest of the same patch is untouched');
+  });
+
+  test('an approved value stands, and the same answer is only looked up once', async () => {
+    let calls = 0;
+    const { agent, sent } = harness(formWithVerify(async () => { calls += 1; return { ok: true }; }));
+    save(agent, FULL);
+    await tick();
+    save(agent, { anfitrion: FULL.anfitrion }, 2);        // the model repeats itself
+    await tick();
+
+    assert.equal(calls, 1, 'a visitor must not wait twice for the same lookup');
+    assert.equal(state(agent).data.anfitrion, 'Amalia');
+    assert.deepEqual(outputs(sent).at(-1).missing, []);
+  });
+
+  test('a different answer is looked up again', async () => {
+    let calls = 0;
+    const { agent } = harness(formWithVerify(async () => { calls += 1; return { ok: true }; }));
+    save(agent, FULL);
+    await tick();
+    save(agent, { anfitrion: 'Otra Persona' }, 2);
+    await tick();
+
+    assert.equal(calls, 2);
+    assert.equal(state(agent).data.anfitrion, 'Otra Persona');
+  });
+
+  test('a slow check holds the floor and says who it is looking up', async () => {
+    const net = controllable();
+    const { agent, sent } = harness(formWithVerify(blocking(net.fn, {
+      say: (name) => `Di que estás viendo si ${name} puede recibirlos.`, coverAfterMs: 10,
+    })));
+
+    save(agent, FULL);
+    await tick(40);
+
+    assert.equal(agent.busy, true, 'the microphone is shut while she checks');
+    const cover = beats(sent);
+    assert.equal(cover.length, 1);
+    assert.match(cover[0].response.instructions, /si Amalia puede recibirlos/);
+
+    net.resolve({ ok: true });
+    await tick(40);
+
+    assert.equal(agent.busy, false, 'she is back');
+    assert.deepEqual(outputs(sent).at(-1).missing, [], 'and the value stuck');
+  });
+
+  test('a check that throws is a refusal, not a crash', async () => {
+    const { agent, sent } = harness(formWithVerify(async () => { throw new Error('ECONNREFUSED'); }));
+    save(agent, FULL);
+    await tick();
+
+    assert.match(outputs(sent).at(-1).rejected.join(' '), /^anfitrion: /);
+    assert.equal(state(agent).data.anfitrion, undefined);
+  });
+
+  test('a check that never answers gives up and refuses', async () => {
+    const { agent, sent } = harness(formWithVerify(
+      blocking(() => new Promise(() => {}), { timeoutMs: 30, coverAfterMs: 5 })));
+    save(agent, FULL);
+    await tick(120);
+
+    assert.equal(agent.busy, false, 'a hung directory must not hold the mic shut forever');
+    assert.ok(outputs(sent).at(-1).missing.includes('anfitrion'));
+    assert.equal(agent.registrations.get('r1').status, 'open', 'the visitor can still try again');
+  });
+
+  // The others fake the check. This one is the real form, the real forms/api.js
+  // and the real HTTP parsing — only the directory itself is stubbed.
+  test('the visit form really does check its host against the directory', async () => {
+    const { agent, sent } = harness(visit);
+    save(agent, { ...FULL, anfitrion: 'Rodrigo Salinas' });
+    await tick();
+
+    const out = outputs(sent).at(-1);
+    assert.ok(out.missing.includes('anfitrion'), 'a stranger does not get to be the host');
+    assert.match(out.rejected.join(' '), /directorio/);
+
+    save(agent, { anfitrion: 'Amalia' }, 2);              // half a name the directory does hold
+    await tick();
+    assert.deepEqual(outputs(sent).at(-1).missing, []);
+    assert.equal(state(agent).data.anfitrion, 'Amalia');
+  });
+
+  test('what comes from outside the conversation is not second-guessed', async () => {
+    let calls = 0;
+    const { agent } = harness(formWithVerify(async () => { calls += 1; return { ok: false, error: 'no existe' }; }));
+
+    // A human read the screen and overruled the agent.
+    assert.deepEqual(agent.correct('anfitrion', 'Quien Sea', 'r1'), { ok: true });
+    // And the camera claims to know who the next person is here to see.
+    agent.roomUpdate({ arrived: [{ origin: 'known', personKey: 'p2', label: 'Ana', prefill: { anfitrion: 'Fantasma' }, notes: '' }] });
+    await tick();
+
+    assert.equal(calls, 0, 'the directory only judges what was spoken into save_fields');
+    assert.equal(state(agent).data.anfitrion, 'Quien Sea');
+    assert.equal(agent.registrations.get('r2').state.data.anfitrion, 'Fantasma');
   });
 });
 

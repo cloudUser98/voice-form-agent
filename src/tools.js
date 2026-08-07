@@ -15,7 +15,9 @@
 //   })
 //
 // Options, all optional:
-//   say          what to say while it runs, if it runs long enough to notice
+//   say          what to say while it runs, if it runs long enough to notice.
+//                A function receives the tool's own arguments, so the cover
+//                sentence can name what is being looked up.
 //   done(result) what to say when it succeeds   — `deferred` only
 //   fail(error)  what to say when it fails      — `deferred` only
 //   timeoutMs    give up waiting after this (default 40s)

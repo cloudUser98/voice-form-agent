@@ -138,73 +138,73 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
 }
 
 export function buildTools(form) {
-  const save = {
-    type: 'function',
-    name: 'save_fields',
-    description: 'Record what you have learned about ONE person. Send only the fields you are sure about.',
-    parameters: {
-      type: 'object',
-      properties: {
-        registration: { type: 'string', description: 'Which registration this belongs to, e.g. "r1". Read it off the status block.' },
-        fields: {
-          type: 'object',
-          description: 'The values you learned for that person.',
-          properties: form.schema.properties,
+    const save = {
+        type: 'function',
+        name: 'save_fields',
+        description: 'Record what you have learned about ONE person. Send only the fields you are sure about.',
+        parameters: {
+            type: 'object',
+            properties: {
+                registration: { type: 'string', description: 'Which registration this belongs to, e.g. "r1". Read it off the status block.' },
+                fields: {
+                    type: 'object',
+                    description: 'The values you learned for that person.',
+                    properties: form.schema.properties,
+                },
+                // Display-only. Never validated, never used to reject a value — it is
+                // shown to a human so they can spot a value nobody actually said.
+                quotes: {
+                    type: 'object',
+                    description: 'For each field you are saving, the words the person actually used. Omit a field here if you inferred it rather than heard it.',
+                    additionalProperties: { type: 'string' },
+                },
+            },
+            required: ['registration', 'fields'],
         },
-        // Display-only. Never validated, never used to reject a value — it is
-        // shown to a human so they can spot a value nobody actually said.
-        quotes: {
-          type: 'object',
-          description: 'For each field you are saving, the words the person actually used. Omit a field here if you inferred it rather than heard it.',
-          additionalProperties: { type: 'string' },
+    };
+
+    const submit = {
+        type: 'function',
+        name: 'submit_form',
+        description: "Finalise and submit ONE person's form. Only works once every required field of that registration is filled.",
+        parameters: {
+            type: 'object',
+            properties: { registration: { type: 'string', description: 'Which registration to submit, e.g. "r1".' } },
+            required: ['registration'],
         },
-      },
-      required: ['registration', 'fields'],
-    },
-  };
+    };
 
-  const submit = {
-    type: 'function',
-    name: 'submit_form',
-    description: "Finalise and submit ONE person's form. Only works once every required field of that registration is filled.",
-    parameters: {
-      type: 'object',
-      properties: { registration: { type: 'string', description: 'Which registration to submit, e.g. "r1".' } },
-      required: ['registration'],
-    },
-  };
+    const list = {
+        type: 'function',
+        name: 'open_registrations',
+        description: 'List every registration, who it is for and what it still needs. Use it whenever you are unsure which id belongs to whom.',
+        parameters: { type: 'object', properties: {}, required: [] },
+    };
 
-  const list = {
-    type: 'function',
-    name: 'open_registrations',
-    description: 'List every registration, who it is for and what it still needs. Use it whenever you are unsure which id belongs to whom.',
-    parameters: { type: 'object', properties: {}, required: [] },
-  };
+    const close = {
+        type: 'function',
+        name: 'close_registration',
+        description: 'Abandon a registration that will not be finished — for example the person left and said they would come back later.',
+        parameters: {
+            type: 'object',
+            properties: {
+                registration: { type: 'string', description: 'Which registration to abandon.' },
+                reason: { type: 'string', description: 'Short reason, for the record.' },
+            },
+            required: ['registration'],
+        },
+    };
 
-  const close = {
-    type: 'function',
-    name: 'close_registration',
-    description: 'Abandon a registration that will not be finished — for example the person left and said they would come back later.',
-    parameters: {
-      type: 'object',
-      properties: {
-        registration: { type: 'string', description: 'Which registration to abandon.' },
-        reason: { type: 'string', description: 'Short reason, for the record.' },
-      },
-      required: ['registration'],
-    },
-  };
+    const focus = {
+        type: 'function',
+        name: 'focus',
+        description: 'Say who you are now talking to. Call it whenever you turn your attention to a different person.',
+        parameters: {
+            type: 'object',
+            properties: { registration: { type: 'string', description: 'The registration of the person you are addressing.' } },
+            required: ['registration'],
+        },
+    };
 
-  const focus = {
-    type: 'function',
-    name: 'focus',
-    description: 'Say who you are now talking to. Call it whenever you turn your attention to a different person.',
-    parameters: {
-      type: 'object',
-      properties: { registration: { type: 'string', description: 'The registration of the person you are addressing.' } },
-      required: ['registration'],
-    },
-  };
-
-  return [focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
+    return [focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
 }

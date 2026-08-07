@@ -228,6 +228,7 @@ export class FormAgent extends EventEmitter {
       status: 'open',
       result: null,
       beatDone: false,
+      verified: new Map(),              // field -> the exact value that passed
     };
     this.registrations.set(id, reg);
     return reg;
@@ -415,13 +416,49 @@ export class FormAgent extends EventEmitter {
         new Promise((r) => setTimeout(() => r(false), meta.coverAfterMs)),
       ]);
       if (!finishedFast) {
-        this.#requestResponse(this.#beat(meta.say
+        // A `say` function gets the tool's own arguments, so the cover sentence
+        // can name what is being looked up rather than stalling generically.
+        const say = typeof meta.say === 'function' ? meta.say(...args) : meta.say;
+        this.#requestResponse(this.#beat(say
           || 'Tell them you are dealing with it and to wait a moment. Do NOT say it is done.'));
       }
       return await work;
     } finally {
       this.busy = false;
       this.emit('busy', false);
+    }
+  }
+
+  /**
+   * Some values are only true if something outside this building agrees — a
+   * name that has to exist in a directory. A field says so with `verify` in the
+   * schema, and it runs here, on the way through save_fields.
+   *
+   * That is the whole point of putting it here: save_fields is the only road a
+   * spoken value travels, so the check cannot be skipped. A staff correction
+   * and a camera prefill both come from outside the conversation and are not
+   * second-guessed.
+   *
+   * A refusal is not an error. The field is cleared, the reason joins the same
+   * `rejected` array a schema violation uses, and the board asks for it again —
+   * no new machinery to steer the conversation with. Anything that throws or
+   * times out is a refusal too, so a form that forgets a try/catch can never
+   * break a save.
+   */
+  async #verify(reg, changed, problems) {
+    for (const field of [...changed]) {
+      const check = this.form.schema.properties?.[field]?.verify;
+      if (!check) continue;
+
+      const value = reg.state.data[field];
+      if (reg.verified.get(field) === value) continue;   // this exact answer already passed
+
+      const outcome = await this.#call(check, value, { data: reg.state.data }).catch(() => null);
+      if (outcome?.ok) { reg.verified.set(field, value); continue; }
+
+      reg.state.correct(field, '');                      // clears the value and its evidence
+      changed.splice(changed.indexOf(field), 1);         // never report it as saved
+      problems.push(`${field}: ${outcome?.error || 'no pude confirmarlo'}`);
     }
   }
 
@@ -646,6 +683,7 @@ export class FormAgent extends EventEmitter {
         : (this.#labelOf(this.registrations.get(this.focused)) || this.focused);
 
       const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {}, { addressing });
+      await this.#verify(reg, changed, problems);
       this.#publish(reg);
       return {
         registration: reg.id,

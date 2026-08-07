@@ -19,6 +19,7 @@ predecessor that collapsed under its own harness.
     src/server.js      WebSocket transport (only file that opens ports)
     src/trace.js       JSONL of every event, per session
     forms/*.js         a form = persona paragraph + JSON Schema + submit()
+    forms/api.js       the endpoints a form calls out to. The engine never imports it
     clients/           browser (mic + inspector) and CLI
     detector-sim.js    fake camera service; `npm run dev:detector`, press c/d/g
 
@@ -32,6 +33,13 @@ facts; the board directs.*
 **Tools** (`focus`, `save_fields`, `submit_form`, `open_registrations`,
 `close_registration`) are registration-scoped. The `missing` array in each result
 is what steers the conversation — there is no state machine.
+
+**A field the world has to agree with.** A schema field may carry `verify` — an
+async check that runs *inside* `save_fields`, the only road a spoken value
+travels, so it cannot be skipped. A refusal clears the field and joins the same
+`rejected` array a schema violation uses; the board then asks for it again.
+Every failure is a refusal (not found, 500, timeout, throw). `correct()` and
+prefill skip it — they come from outside the conversation.
 
 **The room owns who exists.** The agent starts silent and holds no registrations.
 A camera snapshot (`people_detected`) creates them via `agent.roomUpdate()`. The

@@ -10,8 +10,13 @@ import { FormAgent } from '../src/agent.js';
 import { FormState } from '../src/form-state.js';
 import { buildBoard } from '../src/prompt.js';
 import { converse } from './helpers.js';
+import { stubHosts } from './hosts-stub.js';
 
-const live = { skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
+// visit's `anfitrion` is checked against the staff directory. Offline, that
+// directory is this list.
+stubHosts();
+
+const live ={ skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
 const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
 
 function harness({ arrive = ['', 'Ana Ruiz'] } = {}) {

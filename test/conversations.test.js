@@ -6,6 +6,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import visit from '../forms/visit.js';
 import hotel from '../forms/hotel.js';
+import { hosts } from '../forms/api.js';
 import { converse } from './helpers.js';
 
 const live = { skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
@@ -33,6 +34,21 @@ describe('visit form', () => {
     ]);
     assert.match(r.data.procedencia, /Lala/i);
     assert.doesNotMatch(r.data.procedencia, /Bimbo/i);
+  });
+
+  // The one field the agent is not allowed to take the visitor's word for.
+  // Whoever the directory actually holds is read from it, so this test does not
+  // depend on a name being seeded there by hand.
+  test('a host who is not in the directory is asked for again', live, async () => {
+    const [known] = await hosts();
+    const r = await converse(visit, [
+      'Soy Ana Ruiz, vengo de Bimbo a una junta.',
+      'Vengo a ver a Rodrigo Salinas Quintanilla.',        // nobody
+      `Ah, perdón, me equivoqué: es ${known}.`,
+    ]);
+    assert.match(r.data.anfitrion || '', new RegExp(known.split(' ')[0], 'i'),
+      'only a name the directory knows may stick');
+    assert.doesNotMatch(r.data.anfitrion || '', /Rodrigo/i);
   });
 
   test('prefilled context is used instead of asked for', live, async () => {

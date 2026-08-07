@@ -82,6 +82,45 @@ model asks again.
 Corrections need no special handling: `save_fields` overwrites. For list fields
 the model sends the whole list.
 
+### A field the world has to agree with
+
+Some values are not ours to accept. `anfitrion` has to be somebody who actually
+works here, and only the staff directory knows that. A field says so with
+`verify`:
+
+```js
+anfitrion: {
+  type: 'string',
+  description: 'Nombre de la persona a la que visitan.',
+  verify: blocking(lookupHost, {
+    say: (name) => `Di que estás viendo si ${name} puede recibirlos.`,
+    timeoutMs: 6000,
+  }),
+}
+```
+
+It runs **inside `save_fields`**, which is the only road a spoken value travels —
+so the check cannot be skipped, and it costs no extra tool call. `blocking` means
+the visitor hears *"déjame ver si Carlos puede recibirte"* and the microphone
+stays shut until the answer is back.
+
+```
+👤 Vengo a ver a Rodrigo Salinas.
+🤖 Déjame ver si Rodrigo Salinas puede recibirte, un momento.
+   ...
+🤖 No encuentro a nadie con ese nombre, ¿me lo repites?
+```
+
+`verify` returns `{ok:true}` or `{ok:false, error}`, and **every** failure is the
+second one — not in the directory, endpoint down, timeout, junk payload. The
+field is cleared and the reason joins the same `rejected` array a schema
+violation uses, so the board says `anfitrion` is missing again and the agent
+asks. A check that throws is a refusal too; a form cannot break a save.
+
+A staff `correct()` and a camera prefill come from outside the conversation and
+are never second-guessed. The endpoints themselves live in `forms/api.js` — the
+engine never imports it.
+
 ## Catching a value the agent got wrong
 
 Models hallucinate. Rather than trying to prevent it with guards that also
