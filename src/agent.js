@@ -74,15 +74,15 @@ export class FormAgent extends EventEmitter {
   }
 
   start() {
-    const { apiKey, model } = this.opts;
-    this.ws = new WebSocket(`${REALTIME_URL}?model=${encodeURIComponent(model)}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    this.ws.on('open', () => this.#configure());
-    this.ws.on('message', (raw) => this.handleEvent(JSON.parse(raw)));
-    this.ws.on('error', (err) => this.emit('error', err));
-    this.ws.on('close', () => { this.trace.close(); this.emit('close'); });
-    return this;
+      const { apiKey, model } = this.opts;
+      this.ws = new WebSocket(`${REALTIME_URL}?model=${encodeURIComponent(model)}`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      this.ws.on('open', () => this.#configure()); // NOTE: This creates the agent
+      this.ws.on('message', (raw) => this.handleEvent(JSON.parse(raw)));
+      this.ws.on('error', (err) => this.emit('error', err));
+      this.ws.on('close', () => { this.trace.close(); this.emit('close'); });
+      return this;
   }
 
   /**
@@ -94,19 +94,19 @@ export class FormAgent extends EventEmitter {
    * generating — but dropping here means a client that does not gate can still
    * never talk over itself.
    */
-  sendAudio(chunk) {
-    if (this.speaking || this.busy) return;
-    this.#send({ type: 'input_audio_buffer.append', audio: Buffer.from(chunk).toString('base64') });
-  }
+   sendAudio(chunk) {
+       if (this.speaking || this.busy) return;
+       this.#send({ type: 'input_audio_buffer.append', audio: Buffer.from(chunk).toString('base64') });
+   }
 
   /** Typed input — same conversation, no microphone. Makes the agent testable. */
   sendText(text) {
-    this.#send({
-      type: 'conversation.item.create',
-      item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
-    });
-    this.trace.write({ dir: 'in', type: 'user.text', text });
-    this.#requestResponse();
+      this.#send({
+          type: 'conversation.item.create',
+          item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+      });
+      this.trace.write({ dir: 'in', type: 'user.text', text });
+      this.#requestResponse();
   }
 
   /**
@@ -219,12 +219,12 @@ export class FormAgent extends EventEmitter {
    * Everything that happens, to the trace file and to anyone watching live.
    * Base64 audio is reduced to a size so the stream stays readable.
    */
-  #record(entry) {
-    this.trace.write(entry);
-    this.emit('debug', typeof entry.delta === 'string' && entry.delta.length > 80
-      ? { ...entry, delta: `<${entry.delta.length} b64 chars>` }
-      : entry);
-  }
+   #record(entry) {
+       this.trace.write(entry);
+       this.emit('debug', typeof entry.delta === 'string' && entry.delta.length > 80
+           ? { ...entry, delta: `<${entry.delta.length} b64 chars>` }
+           : entry);
+   }
 
   /**
    * The only place a response is ever requested.
@@ -576,7 +576,10 @@ export class FormAgent extends EventEmitter {
   }
 
   #instructions() {
-    return buildInstructions(this.form, { notes: this.notes, entries: this.#entries() });
+      return buildInstructions(
+          this.form,
+          { notes: this.notes, entries: this.#entries() }
+      );
   }
 
   /**
@@ -585,10 +588,12 @@ export class FormAgent extends EventEmitter {
    * the middle of a response.
    */
    #scheduleBoard() {
+       // NOTE: Wouldn't be better to implement another mechanism to update the board?
+       //       Does setTimeout could introduce unwanted latency to the agent response?
        clearTimeout(this.boardTimer); // NOTE: WHAT IS A TIMER DOING HERE???
        // NOTE: ANOTHER TIMER?!
        this.boardTimer = setTimeout(() => {
-           if (this.speaking) return this.#scheduleBoard();
+           if (this.speaking) return this.#scheduleBoard(); // NOTE: Why do we need to wait for the agent to stop speaking?
            this.#flushBoard();
        }, 250);
    }
@@ -598,250 +603,254 @@ export class FormAgent extends EventEmitter {
    * before the model gets the floor back — that is the exact turn where a form
    * has just become complete.
    */
-  #flushBoard() {
-    clearTimeout(this.boardTimer);
-    this.boardTimer = null;
-    if (!this.ready) return;
-    this.#send({
-      type: 'session.update',
-      session: { type: 'realtime', instructions: this.#instructions() },
-    });
-  }
+   #flushBoard() {
+       clearTimeout(this.boardTimer); // NOTE: Whats the purpose of clearing the timeout here?
+       this.boardTimer = null;
+       if (!this.ready) return;
+       this.#send({
+           type: 'session.update',
+           session: { type: 'realtime', instructions: this.#instructions() },
+       });
+   }
 
-  #configure() {
-    this.#send({
-      type: 'session.update',
-      session: {
-        type: 'realtime',
-        output_modalities: [this.mode === 'text' ? 'text' : 'audio'],
-        audio: {
-          input: {
-            format: { type: 'audio/pcm', rate: 24000 },
-            // Let the model judge when a thought is finished instead of a
-            // silence timer. Handles "me llamo... Víctor Delgado" without a
-            // number to tune.
-            turn_detection: this.mode === 'text' ? null : { type: 'semantic_vad' },
-            transcription: { model: 'gpt-4o-transcribe', ...(this.form.language ? { language: this.form.language } : {}) },
-          },
-          output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
-        },
-        instructions: this.#instructions(),
-        tools: buildTools(this.form),
-        tool_choice: 'auto',
-      },
-    });
-  }
+   #configure() {
+       this.#send({
+           type: 'session.update',
+           session: {
+               type: 'realtime',
+               output_modalities: [this.mode === 'text' ? 'text' : 'audio'],
+               audio: {
+                   input: {
+                       format: { type: 'audio/pcm', rate: 24000 },
+                       // Let the model judge when a thought is finished instead of a
+                       // silence timer. Handles "me llamo... Víctor Delgado" without a
+                       // number to tune.
+                       turn_detection: this.mode === 'text' ? null : { type: 'semantic_vad' },
+                       transcription: { model: 'gpt-4o-transcribe', ...(this.form.language ? { language: this.form.language } : {}) },
+                   },
+                   output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
+               },
+               instructions: this.#instructions(),
+               tools: buildTools(this.form),
+               tool_choice: 'auto',
+           },
+       });
+   }
 
   /**
    * Handle one server event. Public so tests — and a trace replay — can drive
    * the agent without a socket.
    */
-  handleEvent(e) {
-    this.#record({ dir: 'openai', ...e });
+   handleEvent(e) {
+       this.#record({ dir: 'openai', ...e });
 
-    switch (e.type) {
-      case 'session.updated':
-        if (!this.ready) {
-          this.ready = true;
-          this.emit('open');
-          // Anything the detector reported during the handshake.
-          const queued = this.pendingRoom;
-          this.pendingRoom = [];
-          for (const plan of queued) this.roomUpdate(plan);
-        }
-        return;
+       switch (e.type) {
+           case 'session.updated':
+               if (!this.ready) {
+                   this.ready = true;
+                   this.emit('open');
+                   // Anything the detector reported during the handshake.
+                   const queued = this.pendingRoom;
+                   this.pendingRoom = [];
+                   for (const plan of queued) this.roomUpdate(plan);
+               }
+               return;
 
-      case 'error':
-        return this.emit('error', new Error(e.error?.message || 'realtime error'));
+           case 'error':
+               return this.emit('error', new Error(e.error?.message || 'realtime error'));
 
-      case 'conversation.item.input_audio_transcription.completed':
-        return this.emit('transcript', { role: 'user', text: e.transcript });
+           case 'conversation.item.input_audio_transcription.completed':
+               return this.emit('transcript', { role: 'user', text: e.transcript });
 
-      case 'response.created':
-        this.speaking = true;
-        // Counted per response, not per item: the goodbye is measured to know
-        // when it has finished playing.
-        this.spokenBytes = 0;
-        this.spokenAt = 0;
-        this.emit('speaking', true);
-        return;
+           case 'response.created':
+               this.speaking = true;
+               // Counted per response, not per item: the goodbye is measured to know
+               // when it has finished playing.
+               this.spokenBytes = 0;
+               this.spokenAt = 0;
+               this.emit('speaking', true);
+               return;
 
-      case 'response.output_item.added':
-        this.audio = { itemId: e.item?.id, firstAt: 0, bytes: 0 };
-        return;
+           case 'response.output_item.added':
+               this.audio = { itemId: e.item?.id, firstAt: 0, bytes: 0 };
+               return;
 
-      case 'response.output_audio.delta': {
-        if (e.item_id && e.item_id === this.truncatedItem) return;   // stale, cut already
-        const buf = Buffer.from(e.delta, 'base64');
-        if (this.audio) {
-          if (!this.audio.firstAt) this.audio.firstAt = Date.now();
-          this.audio.bytes += buf.length;
-        }
-        if (!this.spokenAt) this.spokenAt = Date.now();
-        this.spokenBytes += buf.length;
-        return this.emit('audio', buf);
-      }
+           case 'response.output_audio.delta': {
+               if (e.item_id && e.item_id === this.truncatedItem) return;   // stale, cut already
+               const buf = Buffer.from(e.delta, 'base64');
+               if (this.audio) {
+                   if (!this.audio.firstAt) this.audio.firstAt = Date.now();
+                   this.audio.bytes += buf.length;
+               }
+               if (!this.spokenAt) this.spokenAt = Date.now();
+               this.spokenBytes += buf.length;
+               return this.emit('audio', buf);
+           }
 
-      case 'response.done':
-        this.speaking = false;
-        this.responsePending = false;
-        this.emit('speaking', false);
-        return this.#onResponseDone(e.response);
-    }
-  }
+           case 'response.done':
+               this.speaking = false;
+               this.responsePending = false;
+               this.emit('speaking', false);
+               return this.#onResponseDone(e.response);
+       }
+   }
 
-  async #onResponseDone(response) {
-    for (const item of response?.output || []) {
-      if (item.type === 'message') {
-        const text = (item.content || [])
-          .map((c) => c.text || c.transcript || '')
-          .join(' ')
-          .trim();
-        if (text) this.emit('transcript', { role: 'agent', text });
-      }
-    }
+   async #onResponseDone(response) {
+       for (const item of response?.output || []) {
+           if (item.type === 'message') {
+               const text = (item.content || [])
+                   .map((c) => c.text || c.transcript || '')
+                   .join(' ')
+                   .trim();
+               if (text) this.emit('transcript', { role: 'agent', text });
+           }
+       }
 
-    // The session is on its way out: either that turn was the goodbye, or it
-    // was something holding the floor that the goodbye has been waiting for.
-    if (this.ending) return void (this.#sayFarewell() || this.#finish());
+       // The session is on its way out: either that turn was the goodbye, or it
+       // was something holding the floor that the goodbye has been waiting for.
+       if (this.ending) return void (this.#sayFarewell() || this.#finish());
 
-    const calls = (response?.output || []).filter((i) => i.type === 'function_call');
-    if (!calls.length) {
-      // A room event that arrived mid-sentence has been waiting for the floor.
-      if (this.pendingNudge) { this.pendingNudge = false; return this.#requestResponse(); }
-      if (this.queued) { this.queued = false; return this.#requestResponse(); }
-      if (this.busy) return;                           // a blocking tool holds the floor
-      return this.emit('idle');                        // agent finished its turn
-    }
+       const calls = (response?.output || []).filter((i) => i.type === 'function_call');
+       if (!calls.length) {
+           // A room event that arrived mid-sentence has been waiting for the floor.
+           if (this.pendingNudge) { this.pendingNudge = false; return this.#requestResponse(); }
+           if (this.queued) { this.queued = false; return this.#requestResponse(); }
+           if (this.busy) return;                           // a blocking tool holds the floor
+           return this.emit('idle');                        // agent finished its turn
+       }
 
-    const before = new Map([...this.registrations].map(
-      ([id, r]) => [id, { complete: r.state.complete, status: r.status }]));
+       const before = new Map([...this.registrations].map(
+           ([id, r]) => [id, { complete: r.state.complete, status: r.status }]));
 
-    for (const call of calls) {
-      let args = {};
-      try { args = JSON.parse(call.arguments || '{}'); } catch { /* model sent junk; treated as empty */ }
-      const result = await this.#runTool(call.name, args);
-      this.#record({ dir: 'tool', name: call.name, args, result });
-      this.#send({
-        type: 'conversation.item.create',
-        item: { type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) },
-      });
-    }
+       for (const call of calls) {
+           let args = {};
+           // NOTE: We might want to implement a fallback for corrupted args
+           try {
+               args = JSON.parse(call.arguments || '{}');
+           } catch { /* model sent junk; treated as empty */ }
+           
+           const result = await this.#runTool(call.name, args);
+           this.#record({ dir: 'tool', name: call.name, args, result });
+           this.#send({
+               type: 'conversation.item.create',
+               item: { type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) },
+           });
+       }
 
-    // The board must be current BEFORE the model speaks again: this is the
-    // turn where a form may have just become complete.
-    this.#flushBoard();
-    this.pendingNudge = false;
+       // The board must be current BEFORE the model speaks again: this is the
+       // turn where a form may have just become complete.
+       this.#flushBoard();
+       this.pendingNudge = false;
 
-    // Somebody was finished with this turn and others are still waiting.
-    // Checked first: it subsumes the completion case for the person handed to.
-    const justFinished = [...this.registrations.values()].find(
-      (r) => r.status !== 'open' && before.get(r.id)?.status === 'open',
-    );
-    if (justFinished) {
-      const beat = this.#handoverBeat(justFinished);
-      if (beat) return this.#requestResponse(beat);
-      // No beat means nobody is waiting: that was the last person in the room.
-      return this.#endSession(justFinished);
-    }
+       // Somebody was finished with this turn and others are still waiting.
+       // Checked first: it subsumes the completion case for the person handed to.
+       const justFinished = [...this.registrations.values()].find(
+           (r) => r.status !== 'open' && before.get(r.id)?.status === 'open',
+       );
+       if (justFinished) {
+           const beat = this.#handoverBeat(justFinished);
+           if (beat) return this.#requestResponse(beat);
+           // No beat means nobody is waiting: that was the last person in the room.
+           return this.#endSession(justFinished);
+       }
 
-    // Whichever registration just became complete gets its forced beat.
-    const justCompleted = [...this.registrations.values()].find(
-      (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id)?.complete,
-    );
-    if (justCompleted) {
-      const beat = this.#completionBeat(justCompleted);
-      if (beat) {
-        justCompleted.beatDone = true;
-        return this.#requestResponse(beat);
-      }
-    }
+       // Whichever registration just became complete gets its forced beat.
+       const justCompleted = [...this.registrations.values()].find(
+           (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id)?.complete,
+       );
+       if (justCompleted) {
+           const beat = this.#completionBeat(justCompleted);
+           if (beat) {
+               justCompleted.beatDone = true;
+               return this.#requestResponse(beat);
+           }
+       }
 
-    // The model is waiting on those results — give it the floor back.
-    this.#requestResponse();
-  }
+       // The model is waiting on those results — give it the floor back.
+       this.#requestResponse();
+   }
 
-  async #runTool(name, args) {
-    // Tool results report what happened. What to do next lives in the board.
-    if (name === 'open_registrations') {
-      return {
-        registrations: [...this.registrations.values()].map((r) => ({
-          id: r.id, label: this.#labelOf(r), status: r.status, missing: r.state.missing(),
-        })),
-      };
-    }
+   async #runTool(name, args) {
+       // Tool results report what happened. What to do next lives in the board.
+       if (name === 'open_registrations') {
+           return {
+               registrations: [...this.registrations.values()].map((r) => ({
+                   id: r.id, label: this.#labelOf(r), status: r.status, missing: r.state.missing(),
+               })),
+           };
+       }
 
-    // Everything below is about one specific person.
-    const reg = this.#resolve(args.registration);
-    if (!reg) {
-      return {
-        ok: false,
-        error: this.registrations.size
-          ? `unknown registration ${args.registration ?? '(missing)'}`
-          : 'nobody has arrived at reception yet',
-        valid: [...this.registrations.values()]
-          .filter((r) => r.status === 'open')
-          .map((r) => ({ id: r.id, label: this.#labelOf(r) })),
-      };
-    }
+       // Everything below is about one specific person.
+       const reg = this.#resolve(args.registration);
+       if (!reg) {
+           return {
+               ok: false,
+               error: this.registrations.size
+               ? `unknown registration ${args.registration ?? '(missing)'}`
+               : 'nobody has arrived at reception yet',
+               valid: [...this.registrations.values()]
+                   .filter((r) => r.status === 'open')
+                   .map((r) => ({ id: r.id, label: this.#labelOf(r) })),
+           };
+       }
 
-    if (name === 'focus') {
-      this.focused = reg.id;
-      this.#scheduleBoard();
-      this.emit('focus', { registration: reg.id, label: this.#labelOf(reg) });
-      return { ok: true, registration: reg.id, label: this.#labelOf(reg), missing: reg.state.missing() };
-    }
+       if (name === 'focus') {
+           this.focused = reg.id;
+           this.#scheduleBoard();
+           this.emit('focus', { registration: reg.id, label: this.#labelOf(reg) });
+           return { ok: true, registration: reg.id, label: this.#labelOf(reg), missing: reg.state.missing() };
+       }
 
-    if (name === 'save_fields') {
-      // Saving onto someone other than the person being addressed is allowed,
-      // and recorded. A human reading the table sees exactly that.
-      const addressing = reg.id === this.focused
-        ? null
-        : (this.#labelOf(this.registrations.get(this.focused)) || this.focused);
+       if (name === 'save_fields') {
+           // Saving onto someone other than the person being addressed is allowed,
+           // and recorded. A human reading the table sees exactly that.
+           const addressing = reg.id === this.focused
+               ? null
+               : (this.#labelOf(this.registrations.get(this.focused)) || this.focused);
 
-      const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {}, { addressing });
-      await this.#verify(reg, changed, problems);
-      this.#publish(reg);
-      return {
-        registration: reg.id,
-        label: this.#labelOf(reg),
-        saved: changed,
-        missing: reg.state.missing(),
-        ...(problems.length ? { rejected: problems } : {}),
-      };
-    }
+           const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {}, { addressing });
+           await this.#verify(reg, changed, problems);
+           this.#publish(reg);
+           return {
+               registration: reg.id,
+               label: this.#labelOf(reg),
+               saved: changed,
+               missing: reg.state.missing(),
+               ...(problems.length ? { rejected: problems } : {}),
+           };
+       }
 
-    if (name === 'submit_form') {
-      const missing = reg.state.missing();
-      if (missing.length) return { ok: false, registration: reg.id, missing };
-      try {
-        const snapshot = reg.state.snapshot();
-        const result = (await this.#call(this.form.submit, { ...snapshot.data })) || {};
-        reg.status = 'submitted';
-        reg.result = result;
-        this.#advanceFocus(reg);
-        this.emit('done', {
-          registration: reg.id, label: this.#labelOf(reg), ...snapshot, result,
-        });
-        return { ok: true, registration: reg.id, ...result };
-      } catch (err) {
-        return { ok: false, error: 'The registration system did not respond.' };
-      }
-    }
+       if (name === 'submit_form') {
+           const missing = reg.state.missing();
+           if (missing.length) return { ok: false, registration: reg.id, missing };
+           try {
+               const snapshot = reg.state.snapshot();
+               const result = (await this.#call(this.form.submit, { ...snapshot.data })) || {};
+               reg.status = 'submitted';
+               reg.result = result;
+               this.#advanceFocus(reg);
+               this.emit('done', {
+                   registration: reg.id, label: this.#labelOf(reg), ...snapshot, result,
+               });
+               return { ok: true, registration: reg.id, ...result };
+           } catch (err) {
+               return { ok: false, error: 'The registration system did not respond.' };
+           }
+       }
 
-    if (name === 'close_registration') {
-      reg.status = 'closed';
-      this.#advanceFocus(reg);
-      this.trace.write({ dir: 'tool', type: 'closed', registration: reg.id, reason: args.reason });
-      return { ok: true, registration: reg.id };
-    }
+       if (name === 'close_registration') {
+           reg.status = 'closed';
+           this.#advanceFocus(reg);
+           this.trace.write({ dir: 'tool', type: 'closed', registration: reg.id, reason: args.reason });
+           return { ok: true, registration: reg.id };
+       }
 
-    const custom = (this.form.tools || []).find((t) => t.definition.name === name);
-    if (custom) {
-      try { return await this.#call(custom.run, args, { data: reg.state.data }); }
-      catch (err) { return { ok: false, error: String(err.message || err) }; }
-    }
+       const custom = (this.form.tools || []).find((t) => t.definition.name === name);
+       if (custom) {
+           try { return await this.#call(custom.run, args, { data: reg.state.data }); }
+           catch (err) { return { ok: false, error: String(err.message || err) }; }
+       }
 
-    return { ok: false, error: `unknown tool ${name}` };
-  }
+       return { ok: false, error: `unknown tool ${name}` };
+   }
 }

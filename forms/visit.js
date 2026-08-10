@@ -46,7 +46,6 @@ export default {
 
     schema: {
         type: 'object',
-        required: ['visitante', 'procedencia', 'motivo', 'anfitrion'],
         properties: {
             visitante: {
                 type: 'string',
@@ -82,6 +81,12 @@ export default {
                 }),
             },
         },
+        required: [
+            'visitante',
+            'procedencia',
+            'motivo',
+            'anfitrion'
+        ]
     },
 
     // `blocking`: the visitor waits for their folio rather than wandering off

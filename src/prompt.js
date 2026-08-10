@@ -8,10 +8,10 @@
 //     happened. They report; they do not instruct.
 
 const describe = (name, spec, required) => {
-  const bits = [spec.type];
-  if (spec.enum) bits.push(`one of: ${spec.enum.join(', ')}`);
-  if (required) bits.push('required');
-  return `- ${name} (${bits.join('; ')})${spec.description ? ` — ${spec.description}` : ''}`;
+    const bits = [spec.type];
+    if (spec.enum) bits.push(`one of: ${spec.enum.join(', ')}`);
+    if (required) bits.push('required');
+    return `- ${name} (${bits.join('; ')})${spec.description ? ` — ${spec.description}` : ''}`;
 };
 
 /**
@@ -104,39 +104,43 @@ function sharedGaps(entries) {
 }
 
 export function buildInstructions(form, { notes, entries = [] } = {}) {
-  const { properties = {}, required = [] } = form.schema;
-  const fields = Object.entries(properties)
-    .map(([name, spec]) => describe(name, spec, required.includes(name)))
-    .join('\n');
+    const { properties = {}, required = [] } = form.schema;
+    const fields = Object.entries(properties)
+        .map(([name, spec]) => describe(name, spec, required.includes(name)))
+        .join('\n');
 
-  return [
-    form.persona.trim(),
-    '',
-    'You are collecting the following information through natural conversation:',
-    fields,
-    '',
-    'How to work:',
-    '- Call save_fields the moment you learn something, even partially. You may save several fields at once.',
-    '- Ask for whatever the status block below says is missing, one thing at a time, in your own words.',
-    '- You may have SEVERAL registrations open at once, one per person. Every save_fields, submit_form and close_registration needs its `registration` id — read it off the status block below. If you lose track of who is who, call open_registrations.',
-    '- Address a person by name before asking them something, so everyone knows who you are talking to.',
-    '- An answer belongs to the person you last addressed, unless the speaker says who they are.',
-    '- Registrations appear on the board when someone walks in and you are told about it. You never create them yourself.',
-    '- A registration with no name yet is somebody the camera did not recognise. Refer to them naturally — the other visitor, the person with them — until they tell you their name.',
-    '- You decide who to ask what, and in what order — whatever keeps the conversation short and natural. Call focus when you turn your attention to a different person, so everyone can see who you are addressing.',
-    '- When several people are missing the SAME field, ask the group once instead of repeating yourself, then save the answer to each registration it applies to with a separate save_fields call.',
-    '- If an answer could belong to more than one person, ask who it was for before saving it. But if you just addressed someone by name, the answer is theirs — do not ask.',
-    '- If someone corrects themselves, call save_fields again with the new value. It replaces the old one.',
-    '- For list fields, always send the complete list, not just the new entry.',
-    '- Never invent a value. If you did not hear it clearly, ask.',
-    '- With save_fields, fill in `quotes` with the words the visitor actually said for each field. Nobody checks this against you and no value is ever rejected because of it — a person reads it to catch mistakes. So report it honestly: if you worked a value out rather than hearing it, leave that field out of `quotes`.',
-    '- A staff member may correct a field behind the scenes. If that happens, accept the new value silently and carry on; never announce it.',
-    '- Never read field names or technical errors out loud. You are having a conversation, not filling a spreadsheet.',
-    notes ? `\nContext about who is in front of you:\n${notes}` : '',
-    '',
-    'The block below is rewritten as things change. Trust it over your memory:',
-    buildBoard(form, entries),
-  ].filter(Boolean).join('\n');
+    let instructions = [
+        form.persona.trim(),
+        '',
+        'You are collecting the following information through natural conversation:',
+        fields,
+        '',
+        'How to work:',
+        '- Call save_fields the moment you learn something, even partially. You may save several fields at once.',
+        '- Ask for whatever the status block below says is missing, one thing at a time, in your own words.',
+        '- You may have SEVERAL registrations open at once, one per person. Every save_fields, submit_form and close_registration needs its `registration` id — read it off the status block below. If you lose track of who is who, call open_registrations.',
+        '- Address a person by name before asking them something, so everyone knows who you are talking to.',
+        '- An answer belongs to the person you last addressed, unless the speaker says who they are.',
+        '- Registrations appear on the board when someone walks in and you are told about it. You never create them yourself.',
+        '- A registration with no name yet is somebody the camera did not recognise. Refer to them naturally — the other visitor, the person with them — until they tell you their name.',
+        '- You decide who to ask what, and in what order — whatever keeps the conversation short and natural. Call focus when you turn your attention to a different person, so everyone can see who you are addressing.',
+        '- When several people are missing the SAME field, ask the group once instead of repeating yourself, then save the answer to each registration it applies to with a separate save_fields call.',
+        '- If an answer could belong to more than one person, ask who it was for before saving it. But if you just addressed someone by name, the answer is theirs — do not ask.',
+        '- If someone corrects themselves, call save_fields again with the new value. It replaces the old one.',
+        '- For list fields, always send the complete list, not just the new entry.',
+        '- Never invent a value. If you did not hear it clearly, ask.',
+        '- With save_fields, fill in `quotes` with the words the visitor actually said for each field. Nobody checks this against you and no value is ever rejected because of it — a person reads it to catch mistakes. So report it honestly: if you worked a value out rather than hearing it, leave that field out of `quotes`.',
+        '- A staff member may correct a field behind the scenes. If that happens, accept the new value silently and carry on; never announce it.',
+        '- Never read field names or technical errors out loud. You are having a conversation, not filling a spreadsheet.',
+        notes ? `\nContext about who is in front of you:\n${notes}` : '',
+        '',
+        'The block below is rewritten as things change. Trust it over your memory:',
+        buildBoard(form, entries),
+    ].filter(Boolean).join('\n');
+    console.log("buildInstructions Output:");
+    console.log(instructions);
+
+    return instructions;
 }
 
 export function buildTools(form) {
