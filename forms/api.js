@@ -77,7 +77,7 @@ export async function registerVisit(data, { timeoutMs = 5000 } = {}) {
         // ],
         "imagen_ine_1": "",
         "imagen_ine_2": "",
-        "imagen_principal": ""
+        "imagen_principal": data.foto || ""
     }
     
     const res = await fetch(

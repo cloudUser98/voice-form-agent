@@ -12,6 +12,11 @@ const form = args[0] || 'visit';
 const notes = args.includes('--notes') ? args[args.indexOf('--notes') + 1] : '';
 const url = process.env.AGENT_URL || 'ws://localhost:8787';
 
+// 1x1 JPEG, for standing in as whatever a real client's camera would produce.
+const PIXEL = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJ'
+  + 'CQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAB'
+  + 'AAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
+
 const ws = new WebSocket(url);
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '👤 ' });
 
@@ -42,6 +47,14 @@ ws.on('message', (raw, isBinary) => {
   if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
   if (e.type === 'state') console.log(`   [${e.registration} ${e.label || '(sin nombre)'} · missing: ${e.missing.join(', ') || 'nothing'}]`);
   if (e.type === 'done') console.log(`✅ ${e.registration} ${e.label || ''} ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`);
+  // A terminal has no camera. The agent does not care what a photo is, only
+  // that something came back — but the endpoint at the far end does, and a
+  // string that is not an image comes back from it as a 500. So the stub is a
+  // real one-pixel JPEG.
+  if (e.type === 'request') {
+    console.log(`   [client: ${e.kind} for ${e.registration || '?'}]`);
+    ws.send(JSON.stringify({ type: 'answer', id: e.id, value: PIXEL }));
+  }
   if (e.type === 'error') console.error(`⚠️  ${e.error}`);
   if (e.type === 'idle') { waiting = true; queue.length ? pump() : rl.prompt(); }
 });

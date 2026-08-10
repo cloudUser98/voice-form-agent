@@ -7,6 +7,9 @@
 //   client -> {type:'text', text}          typed input instead of speech
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'detected', event}   a raw snapshot, if the client owns the camera
+//   client -> {type:'answer', id, value}   the reply to a server request
+//   server -> {type:'request', id, kind, ...}  do something only you can do, and
+//             answer with it. The agent waits, with no deadline, until you do.
 //   server -> {type:'waiting'}   armed; nobody is in the room yet
 //   server -> {type:'ended'}     everyone was dealt with; back to waiting
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'speaking'|'flush'|'done'|'error'}
@@ -83,6 +86,7 @@ wss.on('connection', (ws) => {
             const r = agent.correct(msg.field, msg.value, msg.registration);
             return r.ok || say({ type: 'error', error: r.error });
         }
+        if (msg.type === 'answer') return agent.answer(msg.id, msg.value);
         say({ type: 'error', error: `unknown message ${msg.type}` });
     });
 
@@ -129,6 +133,7 @@ wss.on('connection', (ws) => {
         a.on('speaking', (on) => say({ type: 'speaking', on }));
         a.on('focus', (f) => say({ type: 'focus', ...f }));
         a.on('flush', () => say({ type: 'flush' }));
+        a.on('request', (r) => say({ type: 'request', ...r }));
         a.on('done', (d) => say({ type: 'done', ...d }));
         a.on('error', (e) => say({ type: 'error', error: String(e.message || e) }));
 

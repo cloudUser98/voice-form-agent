@@ -41,6 +41,20 @@ travels, so it cannot be skipped. A refusal clears the field and joins the same
 Every failure is a refusal (not found, 500, timeout, throw). `correct()` and
 prefill skip it — they come from outside the conversation.
 
+**A field only the client can fill.** A field may carry `client: true`, and then
+nobody in the conversation can fill it — not the visitor, who cannot say a
+photograph out loud, and not the model, which is left out of `save_fields`'
+parameters and refused if it writes there regardless. It arrives through a form
+tool calling `ask('photo', …)`: a request the transport forwards to whoever
+holds the client, waited on with **no deadline**, because somebody still walking
+up to the camera is not a failure. What lands in the form is the token
+`captured`; the bytes live in `reg.attachments` and are merged back in
+`submit_form` alone. That split is the entire point — `data` is restated into
+the session instructions on every change, written to the trace and mirrored to
+the debug stream, so base64 in `data` is base64 in all four. Nobody listening
+means nobody can answer, so `ask` resolves empty; that is what lets text mode
+and the offline suite run with no client at the other end.
+
 **The room owns who exists.** The agent starts silent and holds no registrations.
 A camera snapshot (`people_detected`) creates them via `agent.roomUpdate()`. The
 model cannot create registrations. The realtime session itself only opens on the
@@ -72,6 +86,13 @@ This took read-back reliability from 4/5 to 5/5.
 units. `mode:'text'` runs the whole agent with typed input, which is what makes
 end-to-end tests cheap. Existing tests are a regression contract: do not edit
 them to fit new code.
+
+What "complete" means comes from the schema, via `fill(form)` in `test/helpers.js`
+— never a literal. A hardcoded set of fields is a fixture that goes stale the
+day a form grows one, and takes thirty unrelated assertions with it. Tests about
+engine machinery run against `withoutClient(form)`, because handover and session
+end have no opinion about cameras. Name a field only when the field is the
+subject of the test, the way `tool-modes` names `anfitrion` to test `verify`.
 
 ## Gotchas
 

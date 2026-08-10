@@ -143,6 +143,25 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
     return instructions;
 }
 
+/**
+ * The fields the model may write.
+ *
+ * A field the client owns is left out entirely: it is filled by whatever tool
+ * captures it, and a value invented here would satisfy `missing` so that tool
+ * would never be called. It stays in the schema proper, because that is what
+ * puts it on the board as still needed.
+ *
+ * Our own keywords go too. `verify` is a function and dies in JSON anyway;
+ * `client` would survive and reach the API as a keyword it has never heard of.
+ */
+function savableFields(schema) {
+    return Object.fromEntries(
+        Object.entries(schema.properties || {})
+            .filter(([, spec]) => !spec.client)
+            .map(([name, { verify, client, ...spec }]) => [name, spec]),
+    );
+}
+
 export function buildTools(form) {
     const save = {
         type: 'function',
@@ -155,7 +174,7 @@ export function buildTools(form) {
                 fields: {
                     type: 'object',
                     description: 'The values you learned for that person.',
-                    properties: form.schema.properties,
+                    properties: savableFields(form.schema),
                 },
                 // Display-only. Never validated, never used to reject a value — it is
                 // shown to a human so they can spot a value nobody actually said.

@@ -137,6 +137,11 @@
       background: #e2e8ff;
       color: #33a;
   }
+
+  .client {
+      background: #e6f4f1;
+      color: #068;
+  }
   
   .cross {
       background: #ffe0e0;
@@ -210,6 +215,18 @@ function render(ev, ws) {
   $('forms').replaceChildren(...[...openForms.entries()].map(([id, e]) => block(id, e, ws)));
 }
 
+// Where a value came from. `client` means this browser produced it and there is
+// no spoken quote behind it to check.
+function tagCell(ev) {
+  const td = document.createElement('td');
+  if (ev) {
+    const src = ev.source || 'inferred';
+    td.innerHTML = `<span class="tag ${src}">${src}</span>`
+      + (ev.cross ? ' <span class="tag cross">cross</span>' : '');
+  }
+  return td;
+}
+
 function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws) {
   const wrap = document.createElement('section');
   const h = document.createElement('h3');
@@ -232,8 +249,20 @@ function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws
 
     row.innerHTML = `<td>${name}</td>`;
     const cell = document.createElement('td');
-    cell.className = 'val';
     cell.textContent = shown;
+    row.append(cell);
+
+    // This one was captured by this very browser. There is nothing here for a
+    // human to overrule — the value on screen is a token, not the photograph.
+    if (ev.source === 'client') {
+      const q = document.createElement('td');
+      q.className = 'quote';
+      q.textContent = '— taken by the client —';
+      row.append(q, tagCell(has ? ev : null));
+      return row;
+    }
+
+    cell.className = 'val';
     cell.title = 'Click to correct';
     cell.onclick = () => {
       const input = document.createElement('input');
@@ -250,21 +279,12 @@ function block(id, { label, data = {}, missing = [], evidence = {}, result }, ws
       cell.replaceChildren(input);
       input.focus();
     };
-    row.append(cell);
 
     const q = document.createElement('td');
     q.className = 'quote';
     q.textContent = ev.heard ? `“${ev.heard}”` : (has ? '— nothing quoted —' : '');
     if (ev.cross) q.textContent += `  ⚠ saved while addressing ${ev.cross}`;
-    row.append(q);
-
-    const tag = document.createElement('td');
-    if (has) {
-      const src = ev.source || 'inferred';
-      tag.innerHTML = `<span class="tag ${src}">${src}</span>`
-        + (ev.cross ? ' <span class="tag cross">cross</span>' : '');
-    }
-    row.append(tag);
+    row.append(q, tagCell(has ? ev : null));
     return row;
   }));
   return wrap;
@@ -348,6 +368,28 @@ $('go').onclick = async () => {
     const tap = new AudioWorkletNode(ctx, 'tap');
     ctx.createMediaStreamSource(stream).connect(tap);
 
+    // ---- camera: the one thing only a client can do ------------------------
+    // The agent asks for 'photo' and waits. What a photo is, how it is framed
+    // and what it costs to take are entirely this file's problem — the server
+    // never learns any of it, and gets back an opaque string.
+    let video = null;
+    async function capture() {
+        if (!video) {
+            const feed = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480, facingMode: 'user' },
+            });
+            video = document.createElement('video');
+            video.srcObject = feed;
+            video.muted = true;
+            await video.play();
+        }
+        const frame = document.createElement('canvas');
+        frame.width = video.videoWidth;
+        frame.height = video.videoHeight;
+        frame.getContext('2d').drawImage(video, 0, 0);
+        return frame.toDataURL('image/jpeg', 0.8);
+    }
+
     // ---- protocol ----------------------------------------------------------
     // The socket is opened only now, after every await above. Opening it earlier
     // races the microphone permission prompt: the socket connects first, onopen
@@ -388,6 +430,15 @@ $('go').onclick = async () => {
         if (e.type === 'speaking') { generating = e.on; paintMic(); }
         if (e.type === 'focus') { focusedId = e.registration; render({}, ws); }
         if (e.type === 'flush') stopPlayback();      // cut short to acknowledge the room
+        if (e.type === 'request' && e.kind === 'photo') {
+            $('status').textContent = `taking a photo of ${e.registration || 'the visitor'}…`;
+            capture().then(
+                (image) => ws.send(JSON.stringify({ type: 'answer', id: e.id, value: image })),
+                (err) => { $('status').textContent = `⚠️ camera: ${err.message}`; },
+            );
+            // A camera that failed sends nothing. The agent keeps waiting, which
+            // is the point: `foto` is required, and there is no way past it.
+        }
         if (e.type === 'debug') logEvent(e.entry);
         if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }
         // The session ended, the connection did not. The board belongs to the

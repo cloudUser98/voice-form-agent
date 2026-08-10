@@ -8,6 +8,7 @@ import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
 import { blocking, deferred, background, modeOf, withTimeout } from '../src/tools.js';
 import { stubHosts } from './hosts-stub.js';
+import { fill, withoutClient } from './helpers.js';
 
 // visit's `anfitrion` is checked against the staff directory. Offline, that
 // directory is this list.
@@ -32,8 +33,13 @@ function harness(form) {
   return { agent, sent };
 }
 
-const formWith = (submit) => ({ ...visit, submit });
-const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
+const formWith = (submit) => ({ ...form, submit });
+// Tool modes and `verify` are what this file is about, so it runs against a
+// visit with nothing for the client to capture. `anfitrion` and `procedencia`
+// keep real values because their actual contents are asserted on below —
+// naming a field is right when the field is the subject.
+const form = withoutClient(visit);
+const FULL = fill(form, { anfitrion: 'Amalia', procedencia: 'Dominos' });
 
 /** Drive one tool call through the agent without awaiting the whole loop. */
 function fire(agent, name, args, n = 1) {
@@ -188,7 +194,7 @@ describe('blocking: she walks away from the desk', () => {
 
 describe('deferred and background: she keeps talking', () => {
   const withTool = (run) => ({
-    ...visit,
+    ...form,
     tools: [{ definition: { type: 'function', name: 'avisar', parameters: { type: 'object', properties: {} } }, run }],
   });
 
@@ -237,13 +243,13 @@ describe('deferred and background: she keeps talking', () => {
 
 describe('verify: a value the world has to agree with', () => {
   const formWithVerify = (verify) => ({
-    ...visit,
+    ...form,
     submit: async () => ({ folio: 'V-9' }),
     schema: {
-      ...visit.schema,
+      ...form.schema,
       properties: {
-        ...visit.schema.properties,
-        anfitrion: { ...visit.schema.properties.anfitrion, verify },
+        ...form.schema.properties,
+        anfitrion: { ...form.schema.properties.anfitrion, verify },
       },
     },
   });
@@ -334,7 +340,7 @@ describe('verify: a value the world has to agree with', () => {
   // The others fake the check. This one is the real form, the real forms/api.js
   // and the real HTTP parsing — only the directory itself is stubbed.
   test('the visit form really does check its host against the directory', async () => {
-    const { agent, sent } = harness(visit);
+    const { agent, sent } = harness(form);
     save(agent, { ...FULL, anfitrion: 'Rodrigo Salinas' });
     await tick();
 
@@ -371,5 +377,16 @@ describe('withTimeout', () => {
 
   test('rejects once the deadline passes', async () => {
     await assert.rejects(() => withTimeout(new Promise(() => {}), 20), /timed out after 20ms/);
+  });
+
+  // Some waits should not be given up on: a tool whose slowness is a person
+  // rather than a server has nothing useful to do when the clock runs out.
+  test('Infinity means no clock at all', async () => {
+    let settle;
+    const held = withTimeout(new Promise((r) => { settle = r; }), Infinity);
+    const raced = await Promise.race([held, new Promise((r) => setTimeout(() => r('still waiting'), 50))]);
+    assert.equal(raced, 'still waiting');
+    settle(7);
+    assert.equal(await held, 7);
   });
 });

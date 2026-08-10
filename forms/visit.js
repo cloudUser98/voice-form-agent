@@ -26,6 +26,40 @@ async function saveVisit(data) {
     }
 }
 
+// The kiosk owns the camera, so the photo is the client's to produce and
+// nobody else's. The tool asks for one and hands back whatever arrives without
+// ever looking at it — the engine turns it into a token and keeps the bytes
+// out of the model's sight.
+//
+// It waits for as long as it takes. Somebody still walking up to the camera is
+// not a failure, and there is nothing sensible to do with a refusal anyway:
+// `foto` is required, so a photo is the only way past it.
+const takePhoto = {
+    definition: {
+        type: 'function',
+        name: 'take_photo',
+        description: 'Toma la fotografía de UNA persona con la cámara. Es la única forma de llenar `foto`.',
+        parameters: {
+            type: 'object',
+            properties: {
+                registration: {
+                    type: 'string',
+                    description: 'De quién es la foto, p. ej. "r1". Léelo del tablero.',
+                },
+            },
+            required: ['registration'],
+        },
+    },
+
+    run: blocking(async ({ registration }, { ask }) => ({
+        ok: true,
+        attach: { foto: await ask('photo', { registration }) },
+    }), {
+        say: 'Diles en UNA frase que vas a tomarles una foto, que miren a la cámara y esperen un momento.',
+        timeoutMs: Infinity,
+    }),
+};
+
 // Corporate receptionist. The whole form is the schema plus a paragraph.
 export default {
     name: 'visit',
@@ -80,14 +114,26 @@ export default {
                     timeoutMs: 6000,
                 }),
             },
+            // `client` means nobody in this conversation can fill it — not the
+            // visitor, who cannot say a photograph out loud, and not the agent,
+            // which is kept out of the tool's schema so it cannot try. It sits
+            // on the board as missing until take_photo puts something there.
+            foto: {
+                type: 'string',
+                client: true,
+                description: 'Fotografía del visitante. La toma la cámara con take_photo; nunca la pidas de palabra ni te la inventes.',
+            },
         },
         required: [
             'visitante',
             'procedencia',
             'motivo',
-            'anfitrion'
+            'anfitrion',
+            'foto'
         ]
     },
+
+    tools: [takePhoto],
 
     // `blocking`: the visitor waits for their folio rather than wandering off
     // mid-save. Swap the body for the real endpoint — the decorator already

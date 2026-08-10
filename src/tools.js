@@ -20,7 +20,9 @@
 //                sentence can name what is being looked up.
 //   done(result) what to say when it succeeds   — `deferred` only
 //   fail(error)  what to say when it fails      — `deferred` only
-//   timeoutMs    give up waiting after this (default 40s)
+//   timeoutMs    give up waiting after this (default 40s). `Infinity` waits for
+//                as long as it takes — for a tool whose slowness is a person
+//                rather than a server, and where giving up would be wrong.
 //   coverAfterMs only bother speaking if it takes longer than this (default 400ms)
 //
 // `done` and `fail` do nothing for `blocking`, because there the real result
@@ -41,6 +43,7 @@ export const modeOf = (fn) => fn?.[MODE] || null;
 
 /** Stop waiting after `ms`. The work carries on; we just stop caring about it. */
 export function withTimeout(promise, ms) {
+  if (!Number.isFinite(ms)) return promise;      // asked to wait indefinitely
   let timer;
   return Promise.race([
     promise.finally(() => clearTimeout(timer)),

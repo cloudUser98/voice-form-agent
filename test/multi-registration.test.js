@@ -8,7 +8,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
-import { converse } from './helpers.js';
+import { converse, fill, withoutClient } from './helpers.js';
 import { stubHosts } from './hosts-stub.js';
 
 // visit's `anfitrion` is checked against the staff directory. Offline, that
@@ -19,7 +19,7 @@ const live ={ skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', ti
 
 /** An agent with a fake socket, so tool results are readable without a network. */
 function harness({ arrive = [''], ...opts } = {}) {
-  const agent = new FormAgent({ form: visit, mode: 'text', apiKey: 'test-key', ...opts });
+  const agent = new FormAgent({ form, mode: 'text', apiKey: 'test-key', ...opts });
   const sent = [];
   agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
   agent.handleEvent({ type: 'session.updated' });
@@ -48,7 +48,11 @@ function harness({ arrive = [''], ...opts } = {}) {
   return { agent, call, sent };
 }
 
-const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
+// Handover, session end and id resolution have no opinion about cameras, so
+// they run against a visit with nothing for the client to capture. What
+// 'complete' means then comes from the schema, not from a literal.
+const form = withoutClient(visit);
+const FULL = fill(form);
 
 describe('registrations', () => {
   test('somebody walking in is what creates r1', () => {
@@ -135,7 +139,7 @@ describe('registrations', () => {
 
 describe('two people in the room', () => {
   test('a newcomer gets their own registration', live, async () => {
-    const r = await converse(visit, [
+    const r = await converse(form, [
       'Soy Víctor Dávalos, vengo de Dominos.',
       (agent) => agent.roomUpdate({ arrived: [{ origin: 'known', personKey: 'p_ana', label: 'Ana Ruiz', prefill: {}, notes: '' }] }),
       'Buenas tardes, soy Ana Ruiz.',
@@ -148,7 +152,7 @@ describe('two people in the room', () => {
   // The failure this whole stage risks: an unprompted answer from the person
   // the agent is NOT talking to, landing on the wrong form.
   test('an interjection does not overwrite the other person\'s answer', live, async () => {
-    const r = await converse(visit, [
+    const r = await converse(form, [
       'Soy Víctor Dávalos, vengo de Dominos.',
       (agent) => agent.roomUpdate({ arrived: [{ origin: 'known', personKey: 'p_ana', label: 'Ana Ruiz', prefill: {}, notes: '' }] }),
       'Perdón, yo soy Ana Ruiz y vengo de Lala.',   // Ana, unprompted, clearly not Víctor

@@ -9,7 +9,7 @@ import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
 import { FormState } from '../src/form-state.js';
 import { buildBoard } from '../src/prompt.js';
-import { converse } from './helpers.js';
+import { converse, fill, withoutClient } from './helpers.js';
 import { stubHosts } from './hosts-stub.js';
 
 // visit's `anfitrion` is checked against the staff directory. Offline, that
@@ -17,10 +17,14 @@ import { stubHosts } from './hosts-stub.js';
 stubHosts();
 
 const live ={ skip: process.env.OPENAI_API_KEY ? false : 'no OPENAI_API_KEY', timeout: 120000 };
-const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
+// Handover, session end and id resolution have no opinion about cameras, so
+// they run against a visit with nothing for the client to capture. What
+// 'complete' means then comes from the schema, not from a literal.
+const form = withoutClient(visit);
+const FULL = fill(form);
 
 function harness({ arrive = ['', 'Ana Ruiz'] } = {}) {
-  const agent = new FormAgent({ form: visit, mode: 'text', apiKey: 'test-key' });
+  const agent = new FormAgent({ form, mode: 'text', apiKey: 'test-key' });
   const sent = [];
   agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
   agent.handleEvent({ type: 'session.updated' });
@@ -116,13 +120,13 @@ describe('handing over to whoever is next', () => {
 
 describe('the board stops contradicting the handover', () => {
   const entry = (id, label, data, status) => {
-    const state = new FormState(visit.schema);
+    const state = new FormState(form.schema);
     state.save(data);
     return { id, label, state, status, result: status === 'submitted' ? { folio: 'V-1' } : null, focused: false };
   };
 
   test('a finished registration no longer tells the agent to stop', () => {
-    const board = buildBoard(visit, [
+    const board = buildBoard(form, [
       entry('r1', 'Víctor', FULL, 'submitted'),
       entry('r2', 'Ana', {}, 'open'),
     ]);
@@ -131,13 +135,13 @@ describe('the board stops contradicting the handover', () => {
   });
 
   test('it still says stop once nobody is left', () => {
-    const board = buildBoard(visit, [entry('r1', 'Víctor', FULL, 'submitted')]);
+    const board = buildBoard(form, [entry('r1', 'Víctor', FULL, 'submitted')]);
     assert.match(board, /Everyone has been dealt with/);
     assert.match(board, /call no tool/);
   });
 
   test('an abandoned registration stops advertising fields it wants', () => {
-    const board = buildBoard(visit, [entry('r1', 'Víctor', {}, 'closed')]);
+    const board = buildBoard(form, [entry('r1', 'Víctor', {}, 'closed')]);
     assert.match(board, /CLOSED/);
     assert.doesNotMatch(board, /missing:/);
   });
@@ -145,7 +149,7 @@ describe('the board stops contradicting the handover', () => {
 
 describe('live', () => {
   test('it turns to the next person without being asked', live, async () => {
-    const r = await converse(visit, [
+    const r = await converse(form, [
       (agent) => agent.roomUpdate({ arrived: [
         { origin: 'known', personKey: 'p_v', label: 'Víctor Dávalos', prefill: {}, notes: '' },
       ] }),

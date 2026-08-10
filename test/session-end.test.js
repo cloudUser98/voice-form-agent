@@ -12,15 +12,20 @@ import assert from 'node:assert/strict';
 import visit from '../forms/visit.js';
 import { FormAgent } from '../src/agent.js';
 import { blocking } from '../src/tools.js';
+import { fill, withoutClient } from './helpers.js';
 import { stubHosts } from './hosts-stub.js';
 
 stubHosts();
 
-const FULL = { visitante: 'Víctor Dávalos', procedencia: 'Dominos', motivo: 'entrega', anfitrion: 'Amalia' };
+// Handover, session end and id resolution have no opinion about cameras, so
+// they run against a visit with nothing for the client to capture. What
+// 'complete' means then comes from the schema, not from a literal.
+const form = withoutClient(visit);
+const FULL = fill(form);
 const tick = () => new Promise((r) => setTimeout(r, 15));
 
-function harness({ arrive = [''], form = visit } = {}) {
-  const agent = new FormAgent({ form, mode: 'text', apiKey: 'test-key' });
+function harness({ arrive = [''], form: using = form } = {}) {
+  const agent = new FormAgent({ form: using, mode: 'text', apiKey: 'test-key' });
   const sent = [];
   const events = [];
   agent.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
@@ -148,7 +153,7 @@ describe('the goodbye waits for the floor', () => {
     const slow = blocking(() => new Promise((r) => { release = () => r({ folio: 'V-9' }); }),
       { say: 'Di que estás guardando.', coverAfterMs: 5 });
 
-    const { agent, call, speak, sent } = harness({ form: { ...visit, submit: slow } });
+    const { agent, call, speak, sent } = harness({ form: { ...form, submit: slow } });
     await call(['save_fields', { registration: 'r1', fields: FULL }]);
 
     sent.length = 0;

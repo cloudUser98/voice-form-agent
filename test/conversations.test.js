@@ -73,7 +73,7 @@ describe('catching and fixing a wrong value', () => {
     for (const field of Object.keys(r.data)) {
       const ev = r.evidence[field];
       assert.ok(ev, `${field} has no provenance`);
-      assert.ok(['heard', 'inferred', 'prefill', 'corrected'].includes(ev.source));
+      assert.ok(['heard', 'inferred', 'prefill', 'corrected', 'client'].includes(ev.source));
       if (ev.source === 'heard') assert.ok(ev.heard?.length, `${field} claims 'heard' with no quote`);
     }
     // Anything genuinely spoken should be quoted, so a human can check it.

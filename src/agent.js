@@ -18,6 +18,7 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  *         'state' {data,missing} | 'focus' {registration} | 'idle'
  *         'speaking' bool | 'done' {data} | 'ended' {session}
  *         'flush' (drop buffered audio) | 'busy' bool (a tool has the floor)
+ *         'request' {id,kind,...} (something only the client can do — answer())
  *         'debug' (every event) | 'error' | 'close'
  *
  * The conversation is half duplex: the agent never listens while it talks, and
@@ -28,50 +29,52 @@ const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
  * on an open socket facing an empty lobby. Whoever arrives next gets a new one.
  */
 export class FormAgent extends EventEmitter {
-  constructor({
-    form,
-    notes = '',
-    maxOpen = 6,                        // guard against runaway registrations
-    mode = 'audio',                     // 'audio' | 'text'
-    apiKey = process.env.OPENAI_API_KEY,
-    model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
-    voice = form?.voice || 'marin',
-    sessionId = `s_${Date.now().toString(36)}`,
-  } = {}) {
-    super();
-    if (!form) throw new Error('FormAgent needs a form definition');
-    if (!apiKey) throw new Error('FormAgent needs an OpenAI API key');
-
-    this.form = form;
-    this.mode = mode;
-    this.notes = notes;
-    this.maxOpen = maxOpen;
-
-    // Registrations exist because the room says a person exists. The model
-    // never creates one, and none exist until the first detection arrives.
-    this.registrations = new Map();
-    this.nextId = 1;
-    this.focused = null;
-    this.greeted = false;
-    this.pendingRoom = [];              // updates that beat the session handshake
-
-    this.sessionId = sessionId;
-    this.speaking = false;
-    this.responsePending = false;       // we asked for a response, none finished yet
-    this.queued = false;                // something wanted the floor while busy
-    this.pendingNudge = false;          // a room event that still needs a reply
-    this.busy = false;                  // a blocking tool has the floor
-    this.audio = null;                  // the response currently being spoken
-    this.truncatedItem = null;          // its deltas are stale; drop them
-    this.ending = false;                // the last person is being said goodbye to
-    this.ended = false;                 // ...and that is done; the session is over
-    this.farewellDone = false;          // the goodbye has been asked for once
-    this.pendingFarewell = null;        // ...or is waiting for the floor
-    this.spokenBytes = 0;               // audio streamed for the current response
-    this.spokenAt = 0;                  // when its first chunk went out
-    this.opts = { apiKey, model, voice };
-    this.trace = openTrace(sessionId, { form: form.name, notes, mode });
-  }
+    constructor({
+        form,
+        notes = '',
+        maxOpen = 6,                        // guard against runaway registrations
+        mode = 'audio',                     // 'audio' | 'text'
+        apiKey = process.env.OPENAI_API_KEY,
+        model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
+        voice = form?.voice || 'marin',
+        sessionId = `s_${Date.now().toString(36)}`,
+    } = {}) {
+        super();
+        if (!form) throw new Error('FormAgent needs a form definition');
+        if (!apiKey) throw new Error('FormAgent needs an OpenAI API key');
+    
+        this.form = form;
+        this.mode = mode;
+        this.notes = notes;
+        this.maxOpen = maxOpen;
+    
+        // Registrations exist because the room says a person exists. The model
+        // never creates one, and none exist until the first detection arrives.
+        this.registrations = new Map();
+        this.nextId = 1;
+        this.focused = null;
+        this.greeted = false;
+        this.pendingRoom = [];              // updates that beat the session handshake
+    
+        this.sessionId = sessionId;
+        this.speaking = false;
+        this.responsePending = false;       // we asked for a response, none finished yet
+        this.queued = false;                // something wanted the floor while busy
+        this.pendingNudge = false;          // a room event that still needs a reply
+        this.busy = false;                  // a blocking tool has the floor
+        this.audio = null;                  // the response currently being spoken
+        this.truncatedItem = null;          // its deltas are stale; drop them
+        this.ending = false;                // the last person is being said goodbye to
+        this.ended = false;                 // ...and that is done; the session is over
+        this.farewellDone = false;          // the goodbye has been asked for once
+        this.pendingFarewell = null;        // ...or is waiting for the floor
+        this.spokenBytes = 0;               // audio streamed for the current response
+        this.spokenAt = 0;                  // when its first chunk went out
+        this.pending = new Map();           // client requests waiting to be answered
+        this.nextRequest = 1;
+        this.opts = { apiKey, model, voice };
+        this.trace = openTrace(sessionId, { form: form.name, notes, mode });
+    }
 
   start() {
       const { apiKey, model } = this.opts;
@@ -144,6 +147,40 @@ export class FormAgent extends EventEmitter {
 
     this.#publish(reg);
     return { ok: true };
+  }
+
+  /**
+   * Ask whoever holds the client for something only they can produce — a
+   * photograph, a signature, a scanned badge. The agent has no idea what it is
+   * asking for or what comes back: `kind` is a word the client understands and
+   * the answer is an opaque value it hands over. Nothing here knows what a
+   * photo is, and nothing here should.
+   *
+   * There is no deadline. A kiosk that has not taken the photo yet is not a
+   * failure, it is a person still walking up to the camera, and hanging up on
+   * them would be the wrong answer to that. The wait ends when the client says
+   * it ends.
+   *
+   * Nobody listening means nobody can answer — text mode, the CLI, a test. The
+   * client's absence must never hang the agent, the same way the detector's
+   * absence never takes the session down, so the request resolves empty.
+   */
+  ask(kind, payload = {}) {
+    if (!this.listenerCount('request')) return Promise.resolve(null);
+    const id = `q${this.nextRequest++}`;
+    return new Promise((resolve) => {
+      this.pending.set(id, resolve);
+      this.emit('request', { id, kind, ...payload });
+    });
+  }
+
+  /** The client answered. An id nobody is waiting on is ignored. */
+  answer(id, value) {
+    const resolve = this.pending.get(id);
+    if (!resolve) return false;
+    this.pending.delete(id);
+    resolve(value);
+    return true;
   }
 
   /**
@@ -254,6 +291,7 @@ export class FormAgent extends EventEmitter {
           result: null,
           beatDone: false,
           verified: new Map(),              // field -> the exact value that passed
+          attachments: new Map(),           // field -> the bytes its token stands for
       };
       this.registrations.set(id, reg);
       return reg;
@@ -566,6 +604,37 @@ export class FormAgent extends EventEmitter {
     }
   }
 
+  /**
+   * Take `attach` out of a tool result and put a token in the form instead.
+   *
+   * A photograph is sixty kilobytes of base64, and `data` is read by four
+   * different things: the board stringifies every value into the session
+   * instructions and pushes them on each change, tool results are written to
+   * the trace and mirrored to the debug stream, and the result itself goes
+   * back to the model. Bytes in `data` are bytes in all four.
+   *
+   * So what lands in the form is the word `captured`. The value it stands for
+   * lives beside it and is put back in exactly one place, submit_form, which
+   * is the only thing that ever actually needed it.
+   *
+   * The token is written straight in rather than through `state.correct()`:
+   * this is not a human overruling the agent, and the `client` source is what
+   * tells a screen this field is not one anybody typed.
+   */
+  #attach(reg, out) {
+    if (!out?.attach) return out;
+
+    for (const [field, value] of Object.entries(out.attach)) {
+      reg.attachments.set(field, value);
+      reg.state.data[field] = 'captured';
+      reg.state.evidence[field] = { source: 'client', heard: null };
+    }
+    delete out.attach;              // before the caller traces it or sends it on
+
+    this.#publish(reg);
+    return out;
+  }
+
   /** When the person being addressed is finished with, move to whoever is next. */
   #advanceFocus(from) {
     if (this.focused !== from.id) return;
@@ -808,7 +877,17 @@ export class FormAgent extends EventEmitter {
                ? null
                : (this.#labelOf(this.registrations.get(this.focused)) || this.focused);
 
-           const { problems, changed } = reg.state.save(args.fields || {}, args.quotes || {}, { addressing });
+           // A field the client owns is not the model's to write. Leaving it out
+           // of the tool schema asks it not to; this is what stops it. A value
+           // invented here would satisfy `missing`, and the tool that actually
+           // captures the thing would then never be called at all.
+           const fields = { ...(args.fields || {}) };
+           const refused = Object.keys(fields)
+               .filter((f) => this.form.schema.properties?.[f]?.client);
+           for (const f of refused) delete fields[f];
+
+           const { problems, changed } = reg.state.save(fields, args.quotes || {}, { addressing });
+           for (const f of refused) problems.push(`${f}: not yours to fill; the kiosk captures it`);
            await this.#verify(reg, changed, problems);
            this.#publish(reg);
            return {
@@ -825,7 +904,11 @@ export class FormAgent extends EventEmitter {
            if (missing.length) return { ok: false, registration: reg.id, missing };
            try {
                const snapshot = reg.state.snapshot();
-               const result = (await this.#call(this.form.submit, { ...snapshot.data })) || {};
+               // Tokens go back to being what they stand for. This is the only
+               // place the real bytes leave `attachments` — the snapshot the
+               // screen and the trace get still carries the token.
+               const payload = { ...snapshot.data, ...Object.fromEntries(reg.attachments) };
+               const result = (await this.#call(this.form.submit, payload)) || {};
                reg.status = 'submitted';
                reg.result = result;
                this.#advanceFocus(reg);
@@ -845,10 +928,20 @@ export class FormAgent extends EventEmitter {
            return { ok: true, registration: reg.id };
        }
 
-       const custom = (this.form.tools || []).find((t) => t.definition.name === name);
-       if (custom) {
-           try { return await this.#call(custom.run, args, { data: reg.state.data }); }
-           catch (err) { return { ok: false, error: String(err.message || err) }; }
+       const customTool = (this.form.tools || []).find((t) => t.definition.name === name);
+       if (customTool) {
+           // `ask` is how a form reaches the client. What it asks for, and what
+           // it does with the answer, is the form's business; the engine only
+           // carries it — and diverts whatever comes back as `attach`.
+           try {
+               return this.#attach(reg, await this.#call(customTool.run, args, {
+                   data: reg.state.data,
+                   ask: (kind, payload) => this.ask(kind, payload),
+               }));
+           }
+           catch (err) {
+               return { ok: false, error: String(err.message || err) };
+           }
        }
 
        return { ok: false, error: `unknown tool ${name}` };
