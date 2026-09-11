@@ -321,7 +321,7 @@ $('verbose').onchange = () => {
 
 $('go').onclick = async () => {
     $('go').disabled = true;
-    $('status').textContent = 'connecting…';
+    $('status').textContent = 'connecting.';
 
     const ctx = new AudioContext({ sampleRate: RATE });
 
@@ -354,7 +354,9 @@ $('go').onclick = async () => {
         $('mic').className = open ? 'mic-on' : 'mic-off';
         $('mic').textContent = open ? 'mic open — your turn' : 'mic closed — agent speaking';
     };
+    $('status').textContent = 'connecting..';
     setInterval(paintMic, 100);
+    $('status').textContent = 'connecting...';
 
     // ---- microphone --------------------------------------------------------
     const worklet = `class P extends AudioWorkletProcessor{
@@ -365,8 +367,10 @@ $('go').onclick = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
+    $('status').textContent = 'connecting....';
     const tap = new AudioWorkletNode(ctx, 'tap');
     ctx.createMediaStreamSource(stream).connect(tap);
+    $('status').textContent = 'connecting.....';
 
     // ---- camera: the one thing only a client can do ------------------------
     // The agent asks for 'photo' and waits. What a photo is, how it is framed
@@ -416,11 +420,16 @@ $('go').onclick = async () => {
         ws.send(JSON.stringify({ type: 'detected', event: room }));
     };
 
-    ws.onopen = () => { $('status').textContent = 'waiting for someone to arrive…'; ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true })); };
+    ws.onopen = () => {
+        $('status').textContent = 'waiting for someone to arrive…';
+        ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true }));
+    };
     ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
     ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
 
     ws.onmessage = (ev) => {
+        console.log("Agent server socket message: ", ev.data);
+        
         if (ev.data instanceof ArrayBuffer) return play(ev.data);
         const e = JSON.parse(ev.data);
         if (e.type === 'waiting') $('status').textContent = 'armed — waiting for someone to arrive';

@@ -236,3 +236,10 @@ conversation goes wrong, read the file. `TRACE=off` disables it.
 - In a noisy room an open microphone will still pick up bystanders. That is a
   hardware problem (directional mic) before it is a software one; if you need a
   software gate, mute the mic between `response.created` and `idle`.
+
+
+## References
+
+- Documentation for the OpenaiAI stack lives in (we are not using the Agent SDK):
+    - https://developers.openai.com/api/docs/guides/voice-websockets?api=realtime
+    - https://developers.openai.com/api/docs/guides/realtime-conversations#handling-audio-with-websockets

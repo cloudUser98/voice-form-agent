@@ -78,13 +78,13 @@ export class FormAgent extends EventEmitter {
 
   start() {
       const { apiKey, model } = this.opts;
-      this.ws = new WebSocket(`${REALTIME_URL}?model=${encodeURIComponent(model)}`, {
+      this.realTimeWs = new WebSocket(`${REALTIME_URL}?model=${encodeURIComponent(model)}`, {
           headers: { Authorization: `Bearer ${apiKey}` },
       });
-      this.ws.on('open', () => this.#configure()); // NOTE: This creates the agent
-      this.ws.on('message', (raw) => this.handleEvent(JSON.parse(raw)));
-      this.ws.on('error', (err) => this.emit('error', err));
-      this.ws.on('close', () => { this.trace.close(); this.emit('close'); });
+      this.realTimeWs.on('open', () => this.#configure()); // NOTE: This creates the agent
+      this.realTimeWs.on('message', (raw) => this.handleEvent(JSON.parse(raw)));
+      this.realTimeWs.on('error', (err) => this.emit('error', err));
+      this.realTimeWs.on('close', () => { this.trace.close(); this.emit('close'); });
       return this;
   }
 
@@ -119,7 +119,7 @@ export class FormAgent extends EventEmitter {
    * speak: correcting a typo should not interrupt the conversation.
    */
   correct(field, value, registration) {
-    const reg = this.#resolve(registration);
+    const reg = this.#resolveRegistration(registration);
     if (!reg) return { ok: false, error: `unknown registration ${registration ?? '(missing)'}` };
 
     const outcome = reg.state.correct(field, value);
@@ -195,6 +195,7 @@ export class FormAgent extends EventEmitter {
        // Mid-goodbye this session is spoken for. Somebody walking in now belongs
        // to the next one, which the server opens as soon as this socket closes.
        if (this.ending) return;
+       
        if (!this.ready) {
            this.pendingRoom.push({ arrived, departed, unidentifiedLeft });
            
@@ -202,14 +203,13 @@ export class FormAgent extends EventEmitter {
        }
 
        const lines = [];
-
        for (const person of arrived) {
            const open = [...this.registrations.values()].filter((r) => r.status === 'open');
-           // NOTE: What is maxOpen???
-           if (open.length >= this.maxOpen) break;        // a camera glitch cannot flood us
+           // BUG: How can open.length be greater than maxOpen???
+           if (open.length >= this.maxOpen) break;
            
            const reg = this.#open(person);
-           if (!this.focused) this.focused = reg.id; // Focus
+           if (!this.focused) this.focused = reg.id; // Focus if there is no form focused
            this.#publish(reg);
 
            let line = `- ${reg.id}: ${this.#labelOf(reg) || 'not identified by the camera'}`;
@@ -245,22 +245,24 @@ export class FormAgent extends EventEmitter {
   close() {
     clearTimeout(this.boardTimer);
     clearTimeout(this.endTimer);
-    this.ws?.close?.();
+    this.realTimeWs?.close?.();
   }
 
   // ---------------------------------------------------------------- internals
 
-  #send(event) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(event)); }
+  #send(event) { if (this.realTimeWs?.readyState === WebSocket.OPEN) this.realTimeWs.send(JSON.stringify(event)); }
 
   /**
    * Everything that happens, to the trace file and to anyone watching live.
    * Base64 audio is reduced to a size so the stream stays readable.
    */
-   #record(entry) {
+   #traceEvent(entry) {
        this.trace.write(entry);
-       this.emit('debug', typeof entry.delta === 'string' && entry.delta.length > 80
+
+       value = typeof entry.delta === 'string' && entry.delta.length > 80
            ? { ...entry, delta: `<${entry.delta.length} b64 chars>` }
-           : entry);
+           : entry
+       this.emit("debug", value);
    }
 
   /**
@@ -278,9 +280,17 @@ export class FormAgent extends EventEmitter {
     this.#send(overrides ? { type: 'response.create', response: overrides } : { type: 'response.create' });
   }
 
+  /**
+   * @typedef {Object} Registration
+   * @property {FormState} state - State of the form for the registration.
+   */
+  
+
   /** Create a registration. Only ever called from roomUpdate. */
   #open({ label = '', prefill = {}, origin = 'unknown', personKey = null } = {}) {
       const id = `r${this.nextId++}`; // Creates an ID like r1, r2, rn...
+      
+      /** @type {Registration} */
       const reg = {
           id,
           label,
@@ -302,19 +312,25 @@ export class FormAgent extends EventEmitter {
    * open one — a model that forgets the argument in a one-visitor conversation
    * should not produce an error the visitor can hear.
    */
-  #resolve(id) {
-    if (id) return this.registrations.get(id) || null;
-    const focused = this.registrations.get(this.focused);
-    if (focused?.status === 'open') return focused;
-    const open = [...this.registrations.values()].filter((r) => r.status === 'open');
-    return open.length === 1 ? open[0] : null;
-  }
+   #resolveRegistration(id) {
+       if (id) return this.registrations.get(id) || null;
+       
+       // NOE: This can backfire
+       const focused = this.registrations.get(this.focused);
+       if (focused?.status === 'open') return focused;
+       
+       const open = [...this.registrations.values()].filter((r) => r.status === 'open');
+       return open.length === 1 ? open[0] : null; // NOTE: What is the purpose for this validation?
+   }
 
   /** The name to show and to call the person by. */
   #labelOf(reg) {
       return reg.label || reg.state.data[this.form.labelFrom] || '';
   }
 
+  /**
+   * @param {Registration} reg - Registration to be published.
+   */
   #publish(reg) {
       // A correction that empties a required field earns a fresh confirmation.
       // NOTE: How a registration can be "completed" if it was just created?
@@ -335,7 +351,7 @@ export class FormAgent extends EventEmitter {
    * room can, and only for one sentence.
    */
   #interject(text) {
-    this.#record({ dir: 'room', text });
+    this.#traceEvent({ dir: 'room', text });
 
     const interrupting = this.speaking || this.responsePending;
     if (interrupting) this.#cutOff();
@@ -587,22 +603,22 @@ export class FormAgent extends EventEmitter {
    * times out is a refusal too, so a form that forgets a try/catch can never
    * break a save.
    */
-  async #verify(reg, changed, problems) {
-    for (const field of [...changed]) {
-      const check = this.form.schema.properties?.[field]?.verify;
-      if (!check) continue;
+   async #verify(reg, changed, problems) {
+       for (const field of [...changed]) {
+           const check = this.form.schema.properties?.[field]?.verify;
+           if (!check) continue;
 
-      const value = reg.state.data[field];
-      if (reg.verified.get(field) === value) continue;   // this exact answer already passed
+           const value = reg.state.data[field];
+           if (reg.verified.get(field) === value) continue;   // this exact answer already passed
 
-      const outcome = await this.#call(check, value, { data: reg.state.data }).catch(() => null);
-      if (outcome?.ok) { reg.verified.set(field, value); continue; }
+           const outcome = await this.#call(check, value, { data: reg.state.data }).catch(() => null);
+           if (outcome?.ok) { reg.verified.set(field, value); continue; }
 
-      reg.state.correct(field, '');                      // clears the value and its evidence
-      changed.splice(changed.indexOf(field), 1);         // never report it as saved
-      problems.push(`${field}: ${outcome?.error || 'no pude confirmarlo'}`);
-    }
-  }
+           reg.state.correct(field, '');                      // clears the value and its evidence
+           changed.splice(changed.indexOf(field), 1);         // never report it as saved
+           problems.push(`${field}: ${outcome?.error || 'no pude confirmarlo'}`);
+       }
+   }
 
   /**
    * Take `attach` out of a tool result and put a token in the form instead.
@@ -676,10 +692,18 @@ export class FormAgent extends EventEmitter {
        clearTimeout(this.boardTimer); // NOTE: Whats the purpose of clearing the timeout here?
        this.boardTimer = null;
        if (!this.ready) return;
-       this.#send({
+
+       const flushEvent = {
            type: 'session.update',
-           session: { type: 'realtime', instructions: this.#instructions() },
-       });
+           session: {
+               type: 'realtime',
+               instructions: this.#instructions()
+           }
+       };
+       this.#send(flushEvent);
+
+       console.log("Board flushed to Real Time API!!!");
+       console.log("Sending new instructions:\r\n", flushEvent);
    }
 
    #configure() {
@@ -710,10 +734,11 @@ export class FormAgent extends EventEmitter {
    * Handle one server event. Public so tests — and a trace replay — can drive
    * the agent without a socket.
    */
-   handleEvent(e) {
-       this.#record({ dir: 'openai', ...e });
+   handleEvent(e) { // TODO: Check if there is a type annotation for event
+       this.#traceEvent({ dir: 'openai', ...e });
 
        switch (e.type) {
+           
            case 'session.updated':
                if (!this.ready) {
                    this.ready = true;
@@ -756,11 +781,12 @@ export class FormAgent extends EventEmitter {
                return this.emit('audio', buf);
            }
 
-           case 'response.done':
+           case 'response.done': // NOTE: This is where tools are called by the model
                this.speaking = false;
                this.responsePending = false;
                this.emit('speaking', false);
-               return this.#onResponseDone(e.response);
+               
+               return this.#onResponseDone(e.response); // NOTE: It's returning a promise!
        }
    }
 
@@ -799,7 +825,7 @@ export class FormAgent extends EventEmitter {
            } catch { /* model sent junk; treated as empty */ }
            
            const result = await this.#runTool(call.name, args);
-           this.#record({ dir: 'tool', name: call.name, args, result });
+           this.#traceEvent({ dir: 'tool', name: call.name, args, result });
            this.#send({
                type: 'conversation.item.create',
                item: { type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) },
@@ -850,7 +876,7 @@ export class FormAgent extends EventEmitter {
        }
 
        // Everything below is about one specific person.
-       const reg = this.#resolve(args.registration);
+       const reg = this.#resolveRegistration(args.registration);
        if (!reg) {
            return {
                ok: false,
@@ -889,7 +915,9 @@ export class FormAgent extends EventEmitter {
            const { problems, changed } = reg.state.save(fields, args.quotes || {}, { addressing });
            for (const f of refused) problems.push(`${f}: not yours to fill; the kiosk captures it`);
            await this.#verify(reg, changed, problems);
+           
            this.#publish(reg);
+           
            return {
                registration: reg.id,
                label: this.#labelOf(reg),

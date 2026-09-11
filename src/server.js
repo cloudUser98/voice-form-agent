@@ -29,9 +29,9 @@ const PORT = Number(process.env.PORT || 8787);
 const FORMS = new Map();
 
 async function loadForm(name) {
-    if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('bad form name');
+    if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('bad form name'); // NOTE: Do we really need a regex?
     if (!FORMS.has(name)) {
-        const mod = await import(new URL(`../forms/${name}.js`, import.meta.url));
+        const mod = await import(new URL(`../forms/${name}.js`, import.meta.url)); // NOTE: Forms are javascript files
         FORMS.set(name, mod.default);
     }
     return FORMS.get(name);
@@ -41,8 +41,9 @@ const wss = new WebSocketServer({ port: PORT });
 console.log(`voice-form-agent listening on ws://localhost:${PORT}`);
 
 wss.on('connection', (ws) => {
+    /** @type {FormAgent} */
     let agent = null;
-    let config = null;                  // what to build once somebody shows up
+    let connectionConfig = null;                  // what to build once somebody shows up
     let detector = null;
     
     const say = (obj) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
@@ -60,10 +61,10 @@ wss.on('connection', (ws) => {
 
         if (msg.type === 'start') {
             // NOTE: Check if this validation is correct
-            if (config) return say({ type: 'error', error: 'already started' });
+            if (connectionConfig) return say({ type: 'error', error: 'already started' });
             try {
-                config = {
-                    form:  await loadForm(msg.form), // Visit or Hostpital... for now...
+                connectionConfig = {
+                    form:  await loadForm(msg.form), // .js file
                     name:  msg.form,
                     mode:  msg.mode === 'text' ? 'text' : 'audio',
                     notes: msg.notes || '', // NOTE: Check how this works
@@ -96,18 +97,19 @@ wss.on('connection', (ws) => {
     */
     // NOTE: Ask what is the advantage of declaring this function on websocket connection
     function anaunceDetection(event) {
+        console.log("Detection anaunced: ", event);
         // NOTE: Why not validate everything at the start
-        if (!config) return;
+        if (!connectionConfig) return;
         
-        say({ type: 'detected', event });                 // straight into the inspector
+        say({ type: 'detected', event }); // NOTE: Sera necesario avisarle al cliente?
 
-        const plan = planFromSnapshot(
+        const roomState = planFromSnapshot(
             event,
-            config.form,
+            connectionConfig.form,
             agent ? agent.registrations : new Map()
         );
         
-        if (!plan.arrived.length) return; // No one in sight
+        if (!roomState.arrived.length) return; // No one in sight
 
         // NOTE: Isn't it better to build Agent at the start of the connection
         if (!agent) {
@@ -116,14 +118,14 @@ wss.on('connection', (ws) => {
         }
         // Fires ~400ms before the session is ready; roomUpdate queues it and drains
         // on session.updated.
-        agent.roomUpdate(plan);
+        agent.roomUpdate(roomState);
     }
 
     function build() {
         const a = new FormAgent({
-            form:  config.form,
-            notes: config.notes,
-            mode:  config.mode
+            form:  connectionConfig.form,
+            notes: connectionConfig.notes,
+            mode:  connectionConfig.mode
         });
         a.on('open', () => say({ type: 'ready', session: a.sessionId, trace: a.trace.file }));
         a.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
@@ -144,14 +146,15 @@ wss.on('connection', (ws) => {
         a.on('ended', ({ session }) => {
             agent = null;
             say({ type: 'ended', session });
-            say({ type: 'waiting', form: config.name });
+            say({ type: 'waiting', form: connectionConfig.name });
         });
 
         // A socket that dies while the agent is still the live one is a failure,
         // and the client should hear about it. One that dies after 'ended' is just
         // the agent hanging up, and must not take the kiosk down with it.
         a.on('close', () => { if (agent === a) ws.close(); });
-        if (config.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
+        if (connectionConfig.debug) a.on('debug', (entry) => say({ type: 'debug', entry }));
+        
         return a;
     }
 

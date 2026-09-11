@@ -137,8 +137,8 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
         'The block below is rewritten as things change. Trust it over your memory:',
         buildBoard(form, entries),
     ].filter(Boolean).join('\n');
-    console.log("buildInstructions Output:");
-    console.log(instructions);
+    // console.log("buildInstructions Output:");
+    // console.log(instructions);
 
     return instructions;
 }
