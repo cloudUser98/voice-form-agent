@@ -7,6 +7,8 @@
 //   - tool results (in agent.js) carry facts about an action that just
 //     happened. They report; they do not instruct.
 
+import { isEmpty } from './validate.js';
+
 const describe = (name, spec, required) => {
     const bits = [spec.type];
     if (spec.enum) bits.push(`one of: ${spec.enum.join(', ')}`);
@@ -40,7 +42,7 @@ export function nextAction(form, { label, state }) {
 export function buildBoard(form, entries) {
   if (!entries.length) return '=== OPEN FORMS ===\n(none yet)';
 
-  const lines = entries.map(({ id, label, state, status, result, focused }) => {
+  const lines = entries.map(({ id, label, state, status, result, focused, steps }) => {
     const head = `${focused ? '▶ ' : '  '}${[id, label || '(unnamed)'].filter(Boolean).join(' ')}`;
     const filled = Object.entries(state.data)
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
@@ -61,10 +63,54 @@ export function buildBoard(form, entries) {
       tail = `   COMPLETE ▸ NEXT: ${nextAction(form, { label, state })}`;
     }
 
-    return `${head}\n   filled: ${filled}\n${tail}`;
+    return `${head}\n   filled: ${filled}${optionalLine(form, state, status)}${stepLine(status, steps)}\n${tail}`;
   });
 
   return `=== OPEN FORMS ===\n${lines.join('\n')}${sharedGaps(entries)}${whatNext(entries)}`;
+}
+
+/**
+ * Fields that are not required and are still empty.
+ *
+ * `missing:` lists what the form cannot be submitted without, which is the
+ * right thing for it to list — but it means an optional field is invisible
+ * until something fills it, and a field nobody can see is a field nobody
+ * offers. A visit code is exactly that: not required, because plenty of people
+ * arrive without one, and worth a great deal when it is there.
+ *
+ * So it is stated, and it is stated as something to ask for. Optional means
+ * nobody has to answer, not that nobody gets asked — an optional field that is
+ * never raised is a field that is never filled. The difference from `missing:`
+ * is only in how hard to press, which is why this line says so.
+ */
+function optionalLine(form, state, status) {
+  if (status !== 'open') return '';
+
+  const required = form.schema.required || [];
+  const empty = Object.keys(form.schema.properties || {})
+    .filter((field) => !required.includes(field) && isEmpty(state.data[field]));
+
+  return empty.length
+    ? `\n   still empty, but optional: ${empty.join(', ')}`
+      + '\n   → ask for these like anything else; accept a no and move on.'
+    : '';
+}
+
+/**
+ * A question that has been put to this person but not yet resolved.
+ *
+ * The beat is what makes it get asked; this is what stops it being forgotten if
+ * the conversation wanders before they answer. Both exits are named, because a
+ * step with only one exit is not skippable — it is a wall.
+ */
+function stepLine(status, steps) {
+  if (status !== 'open' || !steps) return '';
+  const pending = [...steps].filter(([, v]) => v === 'pending').map(([k]) => k);
+  if (!pending.length) return '';
+
+  return `\n   awaiting their answer on: ${pending.join(', ')}`
+       + `\n   → if they say yes, call ${pending.join(' / ')}. If they decline or have not got it, `
+       + 'call skip_step. It is asked once; never press them twice.';
 }
 
 /**
@@ -162,7 +208,27 @@ function savableFields(schema) {
     );
 }
 
-export function buildTools(form) {
+/**
+ * The form tools this client can actually serve.
+ *
+ * A tool that reaches out to the client declares the capability it needs — the
+ * same word `ask` uses as its `kind`. The client says what it has when it
+ * starts the session, and a tool it cannot serve is never shown to the model,
+ * so the agent can never offer something that cannot happen. There is nothing
+ * to say out loud about it and no board prose to write: the tool simply is not
+ * there.
+ *
+ * Declaring nothing means having everything. A client that has not been taught
+ * to say what it can do must keep working exactly as it did, and the offline
+ * suite drives the agent directly with no client at all.
+ */
+export function availableTools(form, capabilities = null) {
+    const tools = form.tools || [];
+    if (!capabilities) return tools;
+    return tools.filter((t) => !t.needs || capabilities.includes(t.needs));
+}
+
+export function buildTools(form, capabilities = null) {
     const save = {
         type: 'function',
         name: 'save_fields',
@@ -231,5 +297,30 @@ export function buildTools(form) {
         },
     };
 
-    return [focus, save, submit, list, close, ...(form.tools || []).map((t) => t.definition)];
+    // Only exists when there is something to skip. A form with no optional step
+    // never shows the model a tool for declining one.
+    const skip = {
+        type: 'function',
+        name: 'skip_step',
+        description: 'Record that the visitor turned down an optional step, or has not got what it needs. '
+            + 'Call it as soon as they say no, so you stop being asked to offer it.',
+        parameters: {
+            type: 'object',
+            properties: {
+                registration: { type: 'string', description: 'Whose step this is, e.g. "r1".' },
+                step: { type: 'string', description: 'The name of the step, exactly as the status block spells it.' },
+                reason: { type: 'string', description: 'Short reason, for the record.' },
+            },
+            required: ['registration', 'step'],
+        },
+    };
+
+    const tools = availableTools(form, capabilities);
+    const skippable = tools.some((t) => t.opening);
+
+    return [
+        focus, save, submit, list, close,
+        ...(skippable ? [skip] : []),
+        ...tools.map((t) => t.definition),
+    ];
 }

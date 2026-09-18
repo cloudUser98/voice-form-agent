@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
-import { buildInstructions, buildTools, nextAction } from './prompt.js';
+import { buildInstructions, buildTools, availableTools, nextAction } from './prompt.js';
 import { FormState } from './form-state.js';
 import { modeOf, withTimeout } from './tools.js';
 import { openTrace } from './trace.js';
@@ -34,6 +34,7 @@ export class FormAgent extends EventEmitter {
         notes = '',
         maxOpen = 6,                        // guard against runaway registrations
         mode = 'audio',                     // 'audio' | 'text'
+        capabilities = null,                // what the client can do; null = everything
         apiKey = process.env.OPENAI_API_KEY,
         model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
         voice = form?.voice || 'marin',
@@ -47,6 +48,10 @@ export class FormAgent extends EventEmitter {
         this.mode = mode;
         this.notes = notes;
         this.maxOpen = maxOpen;
+        // What the thing at the other end can actually do. A tool that needs
+        // something this client has not got is never shown to the model, so the
+        // agent cannot offer it. null means nobody said, which means everything.
+        this.capabilities = capabilities;
     
         // Registrations exist because the room says a person exists. The model
         // never creates one, and none exist until the first detection arrives.
@@ -61,7 +66,7 @@ export class FormAgent extends EventEmitter {
         this.responsePending = false;       // we asked for a response, none finished yet
         this.queued = false;                // something wanted the floor while busy
         this.pendingNudge = false;          // a room event that still needs a reply
-        this.busy = false;                  // a blocking tool has the floor
+        this.busyDepth = 0;                 // how many blocking tools hold the floor
         this.audio = null;                  // the response currently being spoken
         this.truncatedItem = null;          // its deltas are stale; drop them
         this.ending = false;                // the last person is being said goodbye to
@@ -75,6 +80,16 @@ export class FormAgent extends EventEmitter {
         this.opts = { apiKey, model, voice };
         this.trace = openTrace(sessionId, { form: form.name, notes, mode });
     }
+
+  /**
+   * Is a blocking tool holding the floor?
+   *
+   * Counted rather than flagged, because blocking tools nest: a tool that comes
+   * back with `fields` runs the `verify` of every field it filled, and one of
+   * those is blocking too. A boolean meant the inner check's `finally` reopened
+   * the microphone while the outer tool was still working.
+   */
+  get busy() { return this.busyDepth > 0; }
 
   start() {
       const { apiKey, model } = this.opts;
@@ -203,12 +218,15 @@ export class FormAgent extends EventEmitter {
        }
 
        const lines = [];
+       const created = [];
+       let opening = false;               // this greeting also asks a skippable question
        for (const person of arrived) {
            const open = [...this.registrations.values()].filter((r) => r.status === 'open');
            // BUG: How can open.length be greater than maxOpen???
            if (open.length >= this.maxOpen) break;
            
            const reg = this.#open(person);
+           created.push(reg);
            if (!this.focused) this.focused = reg.id; // Focus if there is no form focused
            this.#publish(reg);
 
@@ -223,9 +241,21 @@ export class FormAgent extends EventEmitter {
            lines.unshift(first
                ? `${arrived.length > 1 ? 'People have' : 'Someone has'} walked up to reception:`
                : `${arrived.length > 1 ? 'More people have' : 'Someone else has'} arrived:`);
-           lines.push(arrived.length > 1
-               ? 'Greet them together in ONE short sentence, then get on with it.'
-               : 'Greet them briefly, then get on with it.');
+           // An opening step rides along with the greeting rather than earning a
+           // turn of its own, because two forced sentences back to back is not
+           // how anybody says hello. A form with no opening tool, or a client
+           // that cannot serve it, gets the greetings it always got.
+           const ask = this.#pendingOpening(created);
+           lines.push(ask
+               ? (arrived.length > 1
+                   ? 'Greet them together in ONE short sentence.'
+                   : 'Greet them briefly.')
+               : (arrived.length > 1
+                   ? 'Greet them together in ONE short sentence, then get on with it.'
+                   : 'Greet them briefly, then get on with it.'));
+           if (ask) lines.push(`${ask}\nDo not call any tool yet — wait for their answer.`);
+           // 
+           opening = !!ask;
        }
 
        for (const reg of departed) {
@@ -239,7 +269,11 @@ export class FormAgent extends EventEmitter {
        }
 
        if (!lines.length) return;                 // same people as before: stay quiet
-       this.#interject(lines.join('\n'));
+       // With an opening step this is a turn that must ASK before it acts:
+       // otherwise the model answers the greeting by reaching straight for the
+       // thing it was supposed to ask about. With no opening step `speechOnly`
+       // is false and the arrival turn is free to greet and act at once.
+       this.#interject(lines.join('\n'), { speechOnly: opening });
    }
 
   close() {
@@ -259,7 +293,7 @@ export class FormAgent extends EventEmitter {
    #traceEvent(entry) {
        this.trace.write(entry);
 
-       value = typeof entry.delta === 'string' && entry.delta.length > 80
+       const value = typeof entry.delta === 'string' && entry.delta.length > 80
            ? { ...entry, delta: `<${entry.delta.length} b64 chars>` }
            : entry
        this.emit("debug", value);
@@ -302,6 +336,10 @@ export class FormAgent extends EventEmitter {
           beatDone: false,
           verified: new Map(),              // field -> the exact value that passed
           attachments: new Map(),           // field -> the bytes its token stands for
+          // A question that is asked once and may be turned down. Seeded only
+          // with the steps THIS client can actually serve, so a kiosk with no
+          // reader has nothing to skip and codes are never mentioned at all.
+          steps: new Map(this.#openingTools().map((t) => [t.definition.name, 'pending'])),
       };
       this.registrations.set(id, reg);
       return reg;
@@ -322,6 +360,42 @@ export class FormAgent extends EventEmitter {
        const open = [...this.registrations.values()].filter((r) => r.status === 'open');
        return open.length === 1 ? open[0] : null; // NOTE: What is the purpose for this validation?
    }
+
+  /**
+   * Tools that want asking before anything else.
+   *
+   * A tool carries `opening` when its question is only worth asking up front —
+   * a code that fills half the form is worth a sentence before the first
+   * question, and worth nothing after the last. Declining is a normal answer,
+   * so the step is recorded either way and never asked twice.
+   *
+   * Asked once is not the same as available once, and getting that wrong is
+   * what made this hurt the first time round. `scan_code` was an opening step
+   * with a twenty-second deadline, so the question and the tool expired
+   * together and anyone still going through their bag had lost both. The tool
+   * now waits as long as it takes, `codigo` stays on the board as an empty
+   * optional field after a skip, and nothing stops it being called later. What
+   * `opening` buys is only the ORDER — the question comes first, where the
+   * answer is worth four other questions — and never asking it twice unbidden.
+   *
+   * See CONTEXT.md, "A question asked first", for the whole shape.
+   */
+  #openingTools() {
+    return availableTools(this.form, this.capabilities).filter((t) => t.opening);
+  }
+
+  /** What to ask these arrivals before anything else, if anything. */
+  #pendingOpening(regs) {
+    const waiting = new Set();
+    for (const reg of regs) {
+      for (const [step, status] of reg.steps || []) if (status === 'pending') waiting.add(step);
+    }
+    if (!waiting.size) return '';
+    return this.#openingTools()
+      .filter((t) => waiting.has(t.definition.name))
+      .map((t) => t.opening)
+      .join(' ');
+  }
 
   /** The name to show and to call the person by. */
   #labelOf(reg) {
@@ -350,7 +424,7 @@ export class FormAgent extends EventEmitter {
    * back up. This is NOT barge-in: a visitor still cannot interrupt, only the
    * room can, and only for one sentence.
    */
-  #interject(text) {
+  #interject(text, { speechOnly = false } = {}) {
     this.#traceEvent({ dir: 'room', text });
 
     const interrupting = this.speaking || this.responsePending;
@@ -373,7 +447,7 @@ export class FormAgent extends EventEmitter {
 
     // tool_choice 'none' makes this turn speech: it cannot reach for a tool and
     // silently skip the acknowledgement.
-    this.#requestResponse(interrupting ? { tool_choice: 'none' } : null);
+    this.#requestResponse(interrupting || speechOnly ? { tool_choice: 'none' } : null);
   }
 
   /**
@@ -412,6 +486,7 @@ export class FormAgent extends EventEmitter {
       state: r.state,
       status: r.status,
       result: r.result,
+      steps: r.steps,
       focused: r.id === this.focused,
     }));
   }
@@ -540,6 +615,22 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
+   * Hold the floor for the whole of `work`, not just the tool that started it.
+   *
+   * A blocking tool that comes back with `fields` is not finished when its own
+   * function returns: every field it filled still has to be verified, and one of
+   * those checks is a blocking tool in its own right. Without this the floor is
+   * released in between, the microphone reopens for the gap, and the client sees
+   * the agent go free and busy again for what the visitor experiences as one
+   * wait. Depth is counted, so the inner checks simply nest.
+   */
+  async #holdFloor(work) {
+    if (this.busyDepth++ === 0) this.emit('busy', true);
+    try { return await work(); }
+    finally { if (--this.busyDepth === 0) this.emit('busy', false); }
+  }
+
+  /**
    * Run a tool the way it was decorated.
    *
    * Undecorated and `blocking` are both awaited, so callers get a real result
@@ -564,8 +655,9 @@ export class FormAgent extends EventEmitter {
       return { ok: true, status: 'in_progress', note: 'Started. Do NOT say it is finished yet.' };
     }
 
-    this.busy = true;
-    this.emit('busy', true);
+    // Only the outermost blocking tool announces the floor, so a client sees one
+    // pair of events per wait however many checks that wait turns out to contain.
+    if (this.busyDepth++ === 0) this.emit('busy', true);
     try {
       // Only cover the wait if there is a wait worth covering — a 50ms tool
       // does not need "un momento".
@@ -582,8 +674,7 @@ export class FormAgent extends EventEmitter {
       }
       return await work;
     } finally {
-      this.busy = false;
-      this.emit('busy', false);
+      if (--this.busyDepth === 0) this.emit('busy', false);
     }
   }
 
@@ -621,33 +712,76 @@ export class FormAgent extends EventEmitter {
    }
 
   /**
-   * Take `attach` out of a tool result and put a token in the form instead.
+   * Take what a tool brought back and put it where it belongs.
    *
-   * A photograph is sixty kilobytes of base64, and `data` is read by four
-   * different things: the board stringifies every value into the session
-   * instructions and pushes them on each change, tool results are written to
-   * the trace and mirrored to the debug stream, and the result itself goes
-   * back to the model. Bytes in `data` are bytes in all four.
+   * Two kinds of thing can come back, and they go opposite ways.
    *
-   * So what lands in the form is the word `captured`. The value it stands for
-   * lives beside it and is put back in exactly one place, submit_form, which
-   * is the only thing that ever actually needed it.
+   * `attach` is bytes. A photograph is sixty kilobytes of base64, and `data` is
+   * read by four different things: the board stringifies every value into the
+   * session instructions and pushes them on each change, tool results are
+   * written to the trace and mirrored to the debug stream, and the result
+   * itself goes back to the model. Bytes in `data` are bytes in all four. So
+   * what lands in the form is the word `captured`; the value it stands for
+   * lives beside it and is put back in exactly one place, submit_form, which is
+   * the only thing that ever actually needed it.
    *
-   * The token is written straight in rather than through `state.correct()`:
-   * this is not a human overruling the agent, and the `client` source is what
-   * tells a screen this field is not one anybody typed.
+   * `fields` is values — a code the kiosk read, a record a lookup returned. It
+   * is the mirror image: these DO belong in the form, so they travel the exact
+   * road a spoken value travels, `state.save()` then `#verify()`. That is the
+   * whole reason this is not a separate prefill path. A host that arrives on a
+   * printed code is checked against the directory like a spoken one, a value
+   * too long for its field is refused like a spoken one, and the result is
+   * rewritten into the shape save_fields already returns — so the model reads a
+   * tool that filled the form the same way it reads itself filling it, and
+   * nothing new has to go in the instructions.
+   *
+   * Both are stripped from the result before the caller traces it or sends it
+   * on. Neither goes through `state.correct()`: this is not a human overruling
+   * the agent, and the `client` source is what tells a screen that nobody in
+   * the room said this out loud.
    */
-  #attach(reg, out) {
-    if (!out?.attach) return out;
+  async #absorb(reg, name, out) {
+    if (!out || typeof out !== 'object') return out;
+    let touched = false;
 
-    for (const [field, value] of Object.entries(out.attach)) {
-      reg.attachments.set(field, value);
-      reg.state.data[field] = 'captured';
-      reg.state.evidence[field] = { source: 'client', heard: null };
+    if ('fields' in out) {
+      const patch = out.fields;
+      delete out.fields;
+      touched = true;
+
+      // A client that answers with junk must never throw — it simply brought
+      // nothing. The CLI replies to every request it does not recognise with a
+      // JPEG, and that is a client bug, not a reason to break the conversation.
+      const fields = patch && typeof patch === 'object' && !Array.isArray(patch) ? { ...patch } : {};
+
+      // Not the client's to fill either. A value invented here would satisfy
+      // `missing`, and the tool that actually captures the thing would then
+      // never be called — the same refusal save_fields applies to the model.
+      const refused = Object.keys(fields).filter((f) => this.form.schema.properties?.[f]?.client);
+      for (const f of refused) delete fields[f];
+
+      const { problems, changed } = reg.state.save(fields, {}, { source: 'client', via: name });
+      for (const f of refused) problems.push(`${f}: not yours to fill; the kiosk captures it`);
+      await this.#verify(reg, changed, problems);
+
+      Object.assign(out, {
+        saved: changed,
+        missing: reg.state.missing(),
+        ...(problems.length ? { rejected: problems } : {}),
+      });
     }
-    delete out.attach;              // before the caller traces it or sends it on
 
-    this.#publish(reg);
+    if (out.attach) {
+      for (const [field, value] of Object.entries(out.attach)) {
+        reg.attachments.set(field, value);
+        reg.state.data[field] = 'captured';
+        reg.state.evidence[field] = { source: 'client', heard: null, via: name };
+      }
+      delete out.attach;
+      touched = true;
+    }
+
+    if (touched) this.#publish(reg);
     return out;
   }
 
@@ -724,7 +858,7 @@ export class FormAgent extends EventEmitter {
                    output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
                },
                instructions: this.#instructions(),
-               tools: buildTools(this.form),
+               tools: buildTools(this.form, this.capabilities),
                tool_choice: 'auto',
            },
        });
@@ -949,6 +1083,24 @@ export class FormAgent extends EventEmitter {
            }
        }
 
+       if (name === 'skip_step') {
+           // An optional step turned down. Recorded rather than acted on: the
+           // board stops asking, and the tool stays available in case they find
+           // the thing a minute later.
+           const step = args.step;
+           if (!reg.steps?.has(step)) {
+               return {
+                   ok: false,
+                   error: `unknown step ${step ?? '(missing)'}`,
+                   steps: [...(reg.steps?.keys() || [])],
+               };
+           }
+           reg.steps.set(step, 'skipped');
+           this.trace.write({ dir: 'tool', type: 'step.skipped', registration: reg.id, step, reason: args.reason });
+           this.#scheduleBoard();
+           return { ok: true, registration: reg.id, step, missing: reg.state.missing() };
+       }
+
        if (name === 'close_registration') {
            reg.status = 'closed';
            this.#advanceFocus(reg);
@@ -956,16 +1108,32 @@ export class FormAgent extends EventEmitter {
            return { ok: true, registration: reg.id };
        }
 
-       const customTool = (this.form.tools || []).find((t) => t.definition.name === name);
+       // The same filter buildTools used. A model that reaches for a tool this
+       // client cannot serve gets `unknown tool`, not a live scanner.
+       const customTool = availableTools(this.form, this.capabilities)
+           .find((t) => t.definition.name === name);
        if (customTool) {
            // `ask` is how a form reaches the client. What it asks for, and what
            // it does with the answer, is the form's business; the engine only
            // carries it — and diverts whatever comes back as `attach`.
-           try {
-               return this.#attach(reg, await this.#call(customTool.run, args, {
+           // Absorbing is part of the wait, not something after it: a blocking
+           // tool keeps the floor until its values have been verified too.
+           const run = async () => {
+               const out = await this.#absorb(reg, name, await this.#call(customTool.run, args, {
                    data: reg.state.data,
                    ask: (kind, payload) => this.ask(kind, payload),
                }));
+               // Running it answers the question, whatever it brought back. A
+               // reader that found nothing was still offered and still used.
+               if (reg.steps?.get(name) === 'pending') {
+                   reg.steps.set(name, 'done');
+                   this.#scheduleBoard();
+               }
+               return out;
+           };
+
+           try {
+               return modeOf(customTool.run)?.hold ? await this.#holdFloor(run) : await run();
            }
            catch (err) {
                return { ok: false, error: String(err.message || err) };

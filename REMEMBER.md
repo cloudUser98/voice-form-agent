@@ -50,3 +50,20 @@ had to stop asking for one.
 
 They do not merge. Any beat that forgets to prepend `form.persona` drops
 character for exactly the sentence you cared most about.
+
+## A blocking tool's wait does not end when its function returns
+
+`#call` holds the floor for the decorated function and nothing else. A tool that
+comes back with `fields` is not finished at that point: every field it filled
+still has to go through `#verify`, and a `verify` can be a blocking tool of its
+own — `anfitrion` is. Left alone, the floor is released in between. The
+microphone reopens for the gap, and a client watching `busy` sees the agent go
+free and busy again for what the visitor experiences as one single wait.
+
+So the custom-tool branch of `#runTool` wraps the call AND the absorb in
+`#holdFloor`. That is also why `busy` is a depth counter rather than a flag:
+the inner checks nest inside the outer hold, and only the outermost one emits.
+
+Related: `scan_code` finishing does not mean the form is filled. It means the
+values are on their way through the same road a spoken value travels, and one
+of them may still be refused by the directory.

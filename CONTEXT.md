@@ -55,6 +55,46 @@ the debug stream, so base64 in `data` is base64 in all four. Nobody listening
 means nobody can answer, so `ask` resolves empty; that is what lets text mode
 and the offline suite run with no client at the other end.
 
+**A tool that fills fields.** The mirror image of `attach`: a form tool may come
+back with `fields`, and that patch goes through `state.save()` and then
+`#verify()` — the exact road a spoken value travels, in `#absorb`. So a host
+that arrived on a scanned code is checked against the directory like a spoken
+one, a value too long for its field is refused like a spoken one, and the result
+is rewritten into the `{saved, missing, rejected}` shape `save_fields` already
+returns, so nothing new has to go in the instructions. Evidence records
+`{source:'client', via:'<tool>'}`, because nobody in the room said it out loud.
+This is why there is no second "prefill" path: constructor `prefill` skips
+`verify` — right for our own camera, wrong for anything printed by an outside
+system. A tool's patch may not touch a `client: true` field; the kiosk captures
+those, and a value invented for one would satisfy `missing` and stop the tool
+that actually captures it ever being called.
+
+**What the client can do.** A form tool may declare `needs: '<capability>'` — the
+same word `ask` uses as its `kind` — and a client declares `capabilities: [...]`
+in its `start` message. A tool the client cannot serve is never shown to the
+model and is refused by `#runTool`, so the agent can never offer something that
+cannot happen; there is no prose to write about it, the tool simply is not
+there. Declaring nothing means having everything, which is what keeps a client
+that has not been taught to say so, and the whole offline suite, working
+unchanged.
+
+**A question asked first.** A tool may carry `opening: '<directive>'`, and then
+it is put in the arrival turn, riding along with the greeting — with
+`tool_choice:'none'`, so the model must ask before it can act. It is recorded
+per registration in `reg.steps`, described on the board while pending, and
+resolved by calling the tool or by calling `skip_step`. `scan_code` uses it: a
+code answered at the door saves four questions, and the same code answered at
+the end saves none.
+
+It buys ordering and nothing else, which is the distinction that cost us a
+week. Asked once is not available once. The first version paired `opening` with
+a twenty-second deadline, so the question and the tool expired together and
+whoever was slowest to find their code had lost both with no way back. Now the
+tool waits as long as the client takes, a skip leaves `codigo` on the board as
+an empty optional field, and the tool stays callable — so somebody who finds
+their code three questions later still gets to use it. `opening` means ask this
+first and do not nag; it never means this is your one chance.
+
 **The room owns who exists.** The agent starts silent and holds no registrations.
 A camera snapshot (`people_detected`) creates them via `agent.roomUpdate()`. The
 model cannot create registrations. The realtime session itself only opens on the

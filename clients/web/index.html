@@ -161,6 +161,33 @@
       font-size: .95rem;
       color: #333;
   }
+
+  #code-value {
+      width: 100%;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: .5rem .6rem;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+  }
+
+  #code-state {
+      font-size: .72rem;
+      padding: .1rem .4rem;
+      border-radius: 3px;
+      background: #eee;
+      color: #777;
+      text-transform: uppercase;
+  }
+
+  #code-state.waiting {
+      background: #ffe9c7;
+      color: #a60;
+  }
+
+  #code-note {
+      color: #888;
+      font-size: .8rem;
+  }
 </style>
 
 <h1>voice-form-agent</h1>
@@ -168,6 +195,9 @@
   <select id="form"><option>visit</option><option>hotel</option></select>
   <button id="go">Start talking</button>
   <button id="arrive" disabled>Someone arrives</button>
+  <label title="Tell the agent this kiosk can read a code. Fixed when the session starts.">
+    <input type="checkbox" id="reader"> code reader
+  </label>
   <span id="status"></span>
 </p>
 <p><span id="mic" class="mic-off">mic closed</span> — the agent never listens while it speaks.</p>
@@ -176,6 +206,26 @@
   <div>
     <div id="log"></div>
     <div id="forms"></div>
+
+    <!-- Stands in for the thing that reads the QR, the way `capture()` stands in
+         for the camera. What goes back is the string the reader decoded and
+         nothing else — the visit behind it is the server's to know, and looking
+         it up is forms/visit.js' job. -->
+    <section id="code-panel" hidden>
+      <h3>Code reader — <span id="code-state">idle</span></h3>
+      <p style="margin:.2rem 0;color:#888;font-size:.85rem">
+        Whenever the agent asks for the code, <b>Send code</b> lights up. It
+        waits as long as you take — there is no deadline on this side, so
+        giving up is <b>Nothing to read</b>, which is what a real reader would
+        report when it timed out.
+      </p>
+      <input id="code-value" spellcheck="false" autocomplete="off">
+      <p>
+        <button id="code-send" disabled>Send code</button>
+        <button id="code-none" disabled>Nothing to read</button>
+        <span id="code-note">CITA-1234 is the one the stub knows; anything else is an unknown code.</span>
+      </p>
+    </section>
     <p id="hint" style="color:#888;font-size:.85rem">
       ▶ marks who the agent is addressing. Amber means it worked the value out
       rather than hearing it; red <b>cross</b> means it was saved onto this form
@@ -319,6 +369,46 @@ $('verbose').onchange = () => {
   for (const row of $('events').children) if (row.dataset.minor) row.hidden = !$('verbose').checked;
 };
 
+// ---- the code reader ------------------------------------------------------
+// A capability is claimed once, at `start`, and is fixed for the session — so
+// the checkbox stops being a question the moment the session begins. What it
+// controls is only whether `scan_code` is shown to the model at all: with the
+// box unticked the agent never mentions a code and the visitor is asked
+// everything out loud, which is the other half of what there is to test here.
+let pendingCode = null;         // the request id the agent is waiting on
+
+$('code-value').value = 'CITA-1234';
+$('reader').onchange = () => { $('code-panel').hidden = !$('reader').checked; };
+
+function codeState(text, waiting) {
+  $('code-state').textContent = text;
+  $('code-state').className = waiting ? 'waiting' : '';
+  $('code-send').disabled = !waiting;
+  $('code-none').disabled = !waiting;
+}
+
+/**
+ * The agent called scan_code and is holding the floor until this answers.
+ *
+ * There is no timer here and none at the far end either. A real reader decides
+ * for itself when it has waited long enough and reports that it read nothing;
+ * this panel says the same thing with a button. An engine-side deadline was the
+ * first thing we tried and it was wrong: it spent the tool on whoever was
+ * slowest to find their piece of paper.
+ */
+function askForCode(id) {
+  pendingCode = id;
+  codeState('waiting', true);
+}
+
+/** Answer the pending request, with a code or with nothing. */
+function answerCode(ws, value) {
+  if (!pendingCode) return;
+  ws.send(JSON.stringify({ type: 'answer', id: pendingCode, value }));
+  pendingCode = null;
+  codeState(value ? 'sent' : 'nothing read', false);
+}
+
 $('go').onclick = async () => {
     $('go').disabled = true;
     $('status').textContent = 'connecting.';
@@ -420,9 +510,26 @@ $('go').onclick = async () => {
         ws.send(JSON.stringify({ type: 'detected', event: room }));
     };
 
+    // Hand over the decoded string, or say the reader got nothing. There is no
+    // validating to do here any more: what a code means is the server's to
+    // decide, and an unknown one comes back as a spoken "esa cita no existe".
+    $('code-send').onclick = () => answerCode(ws, $('code-value').value.trim());
+    $('code-none').onclick = () => answerCode(ws, null);
+
     ws.onopen = () => {
         $('status').textContent = 'waiting for someone to arrive…';
-        ws.send(JSON.stringify({ type: 'start', form: $('form').value, debug: true }));
+        // Say what this browser can actually be asked for. The camera is always
+        // wired up; the reader is whatever the checkbox said a moment ago, and
+        // is fixed from here on, so the checkbox stops taking answers.
+        $('reader').disabled = true;
+        ws.send(
+            JSON.stringify({
+                type: 'start',
+                form: $('form').value,
+                debug: true,
+                capabilities: $('reader').checked ? ['photo', 'code'] : ['photo'],
+            })
+        );
     };
     ws.onerror = () => { $('status').textContent = `⚠️ cannot reach ws://${host}:8787 — is "npm run serve" running?`; };
     ws.onclose = () => { $('status').textContent = 'closed'; stream.getTracks().forEach((t) => t.stop()); };
@@ -447,6 +554,10 @@ $('go').onclick = async () => {
             );
             // A camera that failed sends nothing. The agent keeps waiting, which
             // is the point: `foto` is required, and there is no way past it.
+        }
+        if (e.type === 'request' && e.kind === 'code') {
+            $('status').textContent = `reading the code of ${e.registration || 'the visitor'}…`;
+            askForCode(e.id);
         }
         if (e.type === 'debug') logEvent(e.entry);
         if (e.type === 'done') { $('status').textContent = `${e.label || e.registration} done · ${JSON.stringify(e.result)}`; render(e, ws); }

@@ -24,18 +24,27 @@ export class FormState {
    * visitor actually used; it is display data only and never affects whether a
    * value is accepted. `addressing` names the person the agent was talking to
    * when the value did NOT belong to them.
+   *
+   * `source` is for a value that did not come out of the conversation at all —
+   * something the client produced, a scanned code. Then there is no quote to
+   * derive provenance from and no point pretending otherwise: it is stated
+   * outright, and `via` records what produced it. Everything else about the
+   * save is identical, which is the point — an outside value is validated,
+   * overwritten and shown exactly like a spoken one.
    */
-  save(patch, quotes = {}, { addressing = null } = {}) {
+  save(patch, quotes = {}, { addressing = null, source = null, via = null } = {}) {
     const { problems, changed } = applyPatch(this.schema, this.data, patch);
     for (const field of changed) {
       const heard = typeof quotes[field] === 'string' ? quotes[field].trim() : '';
-      this.evidence[field] = {
-        source: heard ? 'heard' : 'inferred',
-        heard: heard || null,
-        // Saved onto this form while the agent was talking to someone else.
-        // Never rejected — shown, so a person can spot a mis-attribution.
-        ...(addressing ? { cross: addressing } : {}),
-      };
+      this.evidence[field] = source
+        ? { source, heard: null, ...(via ? { via } : {}) }
+        : {
+          source: heard ? 'heard' : 'inferred',
+          heard: heard || null,
+          // Saved onto this form while the agent was talking to someone else.
+          // Never rejected — shown, so a person can spot a mis-attribution.
+          ...(addressing ? { cross: addressing } : {}),
+        };
     }
     return { changed, problems };
   }

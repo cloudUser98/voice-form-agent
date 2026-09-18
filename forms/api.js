@@ -119,3 +119,48 @@ export async function registerVisit(data, { timeoutMs = 5000 } = {}) {
 //     return asked.every((w) => has.includes(w));
 //   });
 // }
+// ── citas ──────────────────────────────────────────────────────────────────
+
+// What their code decodes to is their system's business, never ours. The kiosk
+// reads an opaque string and hands it over; this exchanges it for the visit it
+// stands for. That split is the whole point and it is what every visitor system
+// converged on: a printed pass carries a token and nothing else, so it can be
+// revoked, expired and rate-limited, and a photocopy is worth nothing without
+// the server agreeing. A code that carried the visit itself would be a form
+// anybody could fill in with a printer.
+//
+// Until APPOINTMENT_URL points somewhere real this answers from CITAS and says
+// so — the same state getHosts is in. `null` means no such appointment; a throw
+// means we could not ask. The caller turns both into one refusal.
+const APPOINTMENT_URL = process.env.APPOINTMENT_URL || '';
+
+const CITAS = {
+  'CITA-1234': {
+    visitante: 'Ana Ruiz',
+    procedencia: 'Bimbo',
+    motivo: 'Junta de seguimiento',
+    anfitrion: 'Amalia Gastelum',
+  },
+};
+
+export async function getAppointment(code, { timeoutMs = 5000 } = {}) {
+  if (!APPOINTMENT_URL) {
+    console.warn(`appointment: APPOINTMENT_URL is not set — answering ${code} locally`);
+    return CITAS[code] || null;
+  }
+
+  const res = await fetch(APPOINTMENT_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${ODRIL_JWT}`,
+    },
+    body: JSON.stringify({ codigo: code }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (res.status === 404) return null;              // a code their system does not know
+  if (res.status !== 200) throw new Error(`appointment: HTTP ${res.status}`);
+  return await res.json();
+}

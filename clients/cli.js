@@ -12,6 +12,17 @@ const form = args[0] || 'visit';
 const notes = args.includes('--notes') ? args[args.indexOf('--notes') + 1] : '';
 const url = process.env.AGENT_URL || 'ws://localhost:8787';
 
+// A terminal has neither a camera nor a reader, so it plays both parts. The
+// agent does not care what a photo or a code is, only that something came back
+// — but the endpoints at the far end do, so the stand-ins are real-shaped: a
+// genuine one-pixel JPEG, and a string of the sort their system prints.
+//
+// CODE is what a scanned QR decodes to, and that is all a reader ever hands
+// over — the visit behind it is looked up server-side. Try another:
+//   CODE='CITA-0000' node clients/cli.js visit      (a code nobody knows)
+//   CODE='' node clients/cli.js visit               (the reader read nothing)
+const CODE = process.env.CODE ?? 'CITA-1234';
+
 // 1x1 JPEG, for standing in as whatever a real client's camera would produce.
 const PIXEL = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJ'
   + 'CQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAB'
@@ -31,7 +42,11 @@ function pump() {
   ws.send(JSON.stringify({ type: 'text', text: queue.shift() }));
 }
 
-ws.on('open', () => ws.send(JSON.stringify({ type: 'start', form, notes, mode: 'text' })));
+// Say what this client can be asked for. A tool needing anything else is never
+// shown to the model, so the agent cannot offer what a terminal cannot do.
+ws.on('open', () => ws.send(JSON.stringify({
+  type: 'start', form, notes, mode: 'text', capabilities: ['photo', 'code'],
+})));
 
 ws.on('message', (raw, isBinary) => {
   if (isBinary) return;                       // a real client would play this
@@ -47,13 +62,13 @@ ws.on('message', (raw, isBinary) => {
   if (e.type === 'transcript' && e.role === 'agent') console.log(`🤖 ${e.text}\n`);
   if (e.type === 'state') console.log(`   [${e.registration} ${e.label || '(sin nombre)'} · missing: ${e.missing.join(', ') || 'nothing'}]`);
   if (e.type === 'done') console.log(`✅ ${e.registration} ${e.label || ''} ${JSON.stringify(e.result)}\n${JSON.stringify(e.data, null, 2)}`);
-  // A terminal has no camera. The agent does not care what a photo is, only
-  // that something came back — but the endpoint at the far end does, and a
-  // string that is not an image comes back from it as a 500. So the stub is a
-  // real one-pixel JPEG.
+  // Answer by kind. An unknown kind is answered with null rather than left
+  // hanging: the agent waits on `ask` with no deadline, and a client that goes
+  // quiet is indistinguishable from one that is still thinking about it.
   if (e.type === 'request') {
     console.log(`   [client: ${e.kind} for ${e.registration || '?'}]`);
-    ws.send(JSON.stringify({ type: 'answer', id: e.id, value: PIXEL }));
+    const value = e.kind === 'photo' ? PIXEL : e.kind === 'code' ? CODE : null;
+    ws.send(JSON.stringify({ type: 'answer', id: e.id, value }));
   }
   if (e.type === 'error') console.error(`⚠️  ${e.error}`);
   if (e.type === 'idle') { waiting = true; queue.length ? pump() : rl.prompt(); }

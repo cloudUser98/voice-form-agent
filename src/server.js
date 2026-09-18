@@ -3,7 +3,11 @@
 // Binary frames are PCM16 mono 24kHz audio, in both directions.
 // Text frames are JSON control/events.
 //
-//   client -> {type:'start', form, notes?, mode?, debug?}   arms the session
+//   client -> {type:'start', form, notes?, mode?, debug?, capabilities?}  arms the
+//             session. `capabilities` is what this client can be asked for —
+//             ['photo','code'] — and a form tool needing anything else is never
+//             shown to the model. Leaving it out means everything, so a client
+//             that predates this keeps working.
 //   client -> {type:'text', text}          typed input instead of speech
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'detected', event}   a raw snapshot, if the client owns the camera
@@ -24,6 +28,7 @@ import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { FormAgent } from './agent.js';
 import { planFromSnapshot } from './detector.js';
+import { availableTools } from './prompt.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const FORMS = new Map();
@@ -69,7 +74,9 @@ wss.on('connection', (ws) => {
                     mode:  msg.mode === 'text' ? 'text' : 'audio',
                     notes: msg.notes || '', // NOTE: Check how this works
                     debug: !!msg.debug,
+                    capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : null,
                 };
+                reportDroppedTools(connectionConfig);
             } catch (err) {
                 return say({ type: 'error', error: String(err.message || err) });
             }
@@ -121,11 +128,31 @@ wss.on('connection', (ws) => {
         agent.roomUpdate(roomState);
     }
 
+    /**
+     * Say out loud which tools this client cannot serve.
+     *
+     * Only the fact, never a verdict. A dropped tool may well be one this form
+     * could not complete without — `foto` is filled by a tool and by nothing
+     * else — but nothing declares which tool fills which field, so guessing at
+     * it here produces a warning that fires when a camera client drops the code
+     * reader and everything is fine. One honest line beats a scary wrong one;
+     * see TODO.md if the precise check ever earns its keep.
+     */
+    function reportDroppedTools({ form, name, capabilities }) {
+        const kept = availableTools(form, capabilities);
+        const dropped = (form.tools || []).filter((t) => !kept.includes(t));
+        if (!dropped.length) return;
+
+        const names = dropped.map((t) => `${t.definition.name} (needs ${t.needs})`).join(', ');
+        console.log(`${name}: client cannot serve ${names}`);
+    }
+
     function build() {
         const a = new FormAgent({
             form:  connectionConfig.form,
             notes: connectionConfig.notes,
-            mode:  connectionConfig.mode
+            mode:  connectionConfig.mode,
+            capabilities: connectionConfig.capabilities,
         });
         a.on('open', () => say({ type: 'ready', session: a.sessionId, trace: a.trace.file }));
         a.on('audio', (buf) => ws.readyState === ws.OPEN && ws.send(buf, { binary: true }));
