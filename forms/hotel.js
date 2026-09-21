@@ -2,7 +2,7 @@
 // existing is the proof that the abstraction holds.
 export default {
   name: 'hotel',
-  language: 'es',
+  language: 'es-MX',
   voice: 'cedar',
 
   persona: `Eres el recepcionista de un hotel boutique. Hablas español, con un

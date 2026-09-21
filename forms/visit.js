@@ -154,7 +154,7 @@ const scanCode = {
 // Corporate receptionist. The whole form is the schema plus a paragraph.
 export default {
     name: 'visit',
-    language: 'es',
+    language: 'es-MX',
     voice: 'marin',
 
     persona: `Eres la recepcionista de un corporativo en México. Hablas español

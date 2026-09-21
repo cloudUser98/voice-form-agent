@@ -37,7 +37,7 @@ configuration surface — there is no DSL to learn.
 ```js
 export default {
   name: 'visit',
-  language: 'es',
+  language: 'es-MX',
   voice: 'marin',
 
   persona: `Eres la recepcionista de un corporativo en México...`,
@@ -55,6 +55,22 @@ export default {
   async submit(data) { return { folio: await registerVisit(data) }; },
 };
 ```
+
+### Language and accent
+
+`language` is a BCP-47 tag (`'es-MX'`, `'pt-BR'`, `'ja-JP'`) or
+`{ locale, accent }` to name the accent yourself
+(`{ locale: 'es-MX', accent: 'a warm norteño accent' }`). Precedence: the
+`language` constructor option, then the form's `language`, then the
+`AGENT_LANGUAGE` env var, then `en-US` (American English).
+
+The Realtime API has no output-language parameter, so the engine steers the
+model with a *Language & accent* block in the session instructions and in every
+per-response override (`src/language.js`). The accent is best-effort — the
+voices are prompt-steered, not locale-native. The transcriber gets the bare
+language (`es`), since it rejects regional tags like `es-MX`. Its model comes
+from `TRANSCRIPTION_MODEL` (default `gpt-4o-transcribe`; `gpt-live-transcribe`
+is supported).
 
 Drop the file in `forms/`, and `{"type":"start","form":"yourform"}` uses it.
 `forms/hotel.js` is a second, unrelated domain running on the same engine.

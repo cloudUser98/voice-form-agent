@@ -139,6 +139,9 @@ subject of the test, the way `tool-modes` names `anfitrion` to test `verify`.
 - `session.update` requires `session.type:'realtime'` on **every** update.
 - Per-response `instructions` **replace** the session's — the persona must ride
   along or the agent drops character for that turn.
+- The same goes for the language block (`languageBlock` in `src/language.js`):
+  without it a beat is the turn where the model drifts into English or loses
+  its accent. Accent is prompt-steered only; the API has no language parameter.
 - All `response.create` calls go through one choke point; two in flight is an error.
 - A stale `node src/server.js` on port 8787 will answer with old code and look
   like a phantom bug. Check `ps aux` first.

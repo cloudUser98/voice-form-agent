@@ -4,6 +4,7 @@ import { buildInstructions, buildTools, availableTools, nextAction } from './pro
 import { FormState } from './form-state.js';
 import { modeOf, withTimeout } from './tools.js';
 import { openTrace } from './trace.js';
+import { resolveLanguage, languageBlock, transcriptionConfig, DEFAULT_LOCALE } from './language.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 
@@ -38,6 +39,10 @@ export class FormAgent extends EventEmitter {
         apiKey = process.env.OPENAI_API_KEY,
         model = process.env.REALTIME_MODEL || 'gpt-realtime-2.1',
         voice = form?.voice || 'marin',
+        // BCP-47 tag or { locale, accent }. The form's wins over the env; the
+        // engine's own default is American English.
+        language = form?.language || process.env.AGENT_LANGUAGE || DEFAULT_LOCALE,
+        transcriptionModel = process.env.TRANSCRIPTION_MODEL || 'gpt-4o-transcribe',
         sessionId = `s_${Date.now().toString(36)}`,
     } = {}) {
         super();
@@ -45,6 +50,7 @@ export class FormAgent extends EventEmitter {
         if (!apiKey) throw new Error('FormAgent needs an OpenAI API key');
     
         this.form = form;
+        this.language = resolveLanguage(language);
         this.mode = mode;
         this.notes = notes;
         this.maxOpen = maxOpen;
@@ -77,7 +83,7 @@ export class FormAgent extends EventEmitter {
         this.spokenAt = 0;                  // when its first chunk went out
         this.pending = new Map();           // client requests waiting to be answered
         this.nextRequest = 1;
-        this.opts = { apiKey, model, voice };
+        this.opts = { apiKey, model, voice, transcriptionModel };
         this.trace = openTrace(sessionId, { form: form.name, notes, mode });
     }
 
@@ -502,7 +508,7 @@ export class FormAgent extends EventEmitter {
   #beat(directive) {
     return {
       tool_choice: 'none',
-      instructions: [this.form.persona.trim(), '', directive].join('\n'),
+      instructions: [this.form.persona.trim(), '', languageBlock(this.language), '', directive].join('\n'),
     };
   }
 
@@ -797,7 +803,7 @@ export class FormAgent extends EventEmitter {
   #instructions() {
       return buildInstructions(
           this.form,
-          { notes: this.notes, entries: this.#entries() }
+          { notes: this.notes, entries: this.#entries(), language: this.language }
       );
   }
 
@@ -841,27 +847,29 @@ export class FormAgent extends EventEmitter {
    }
 
    #configure() {
-       this.#send({
-           type: 'session.update',
-           session: {
-               type: 'realtime',
-               output_modalities: [this.mode === 'text' ? 'text' : 'audio'],
-               audio: {
-                   input: {
-                       format: { type: 'audio/pcm', rate: 24000 },
-                       // Let the model judge when a thought is finished instead of a
-                       // silence timer. Handles "me llamo... Víctor Delgado" without a
-                       // number to tune.
-                       turn_detection: this.mode === 'text' ? null : { type: 'semantic_vad' },
-                       transcription: { model: 'gpt-4o-transcribe', ...(this.form.language ? { language: this.form.language } : {}) },
-                   },
-                   output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
+       this.#send({ type: 'session.update', session: this.sessionConfig() });
+   }
+
+   /** The full session the Realtime API is configured with on connect. */
+   sessionConfig() {
+       return {
+           type: 'realtime',
+           output_modalities: [this.mode === 'text' ? 'text' : 'audio'],
+           audio: {
+               input: {
+                   format: { type: 'audio/pcm', rate: 24000 },
+                   // Let the model judge when a thought is finished instead of a
+                   // silence timer. Handles "me llamo... Víctor Delgado" without a
+                   // number to tune.
+                   turn_detection: this.mode === 'text' ? null : { type: 'semantic_vad' },
+                   transcription: transcriptionConfig(this.opts.transcriptionModel, this.language),
                },
-               instructions: this.#instructions(),
-               tools: buildTools(this.form, this.capabilities),
-               tool_choice: 'auto',
+               output: { format: { type: 'audio/pcm', rate: 24000 }, voice: this.opts.voice },
            },
-       });
+           instructions: this.#instructions(),
+           tools: buildTools(this.form, this.capabilities),
+           tool_choice: 'auto',
+       };
    }
 
   /**

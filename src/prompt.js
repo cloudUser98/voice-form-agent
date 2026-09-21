@@ -8,6 +8,7 @@
 //     happened. They report; they do not instruct.
 
 import { isEmpty } from './validate.js';
+import { resolveLanguage, languageBlock } from './language.js';
 
 const describe = (name, spec, required) => {
     const bits = [spec.type];
@@ -149,7 +150,7 @@ function sharedGaps(entries) {
        + '\n  → you may ask the group once instead of repeating yourself.';
 }
 
-export function buildInstructions(form, { notes, entries = [] } = {}) {
+export function buildInstructions(form, { notes, entries = [], language } = {}) {
     const { properties = {}, required = [] } = form.schema;
     const fields = Object.entries(properties)
         .map(([name, spec]) => describe(name, spec, required.includes(name)))
@@ -157,6 +158,8 @@ export function buildInstructions(form, { notes, entries = [] } = {}) {
 
     let instructions = [
         form.persona.trim(),
+        '',
+        languageBlock(language ?? resolveLanguage(form.language)),
         '',
         'You are collecting the following information through natural conversation:',
         fields,
