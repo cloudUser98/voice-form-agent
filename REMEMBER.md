@@ -67,3 +67,13 @@ the inner checks nest inside the outer hold, and only the outermost one emits.
 Related: `scan_code` finishing does not mean the form is filled. It means the
 values are on their way through the same road a spoken value travels, and one
 of them may still be refused by the directory.
+
+## A live measurement that splits replies on newlines is measuring the script
+
+The model often puts its question after a blank line: `"...en tu perfil. \n\n¿Quieres
+que hagamos el cambio?"`. A shell pipeline that reads one line per reply sees the
+explanation and loses the question. That produced a confident "asks only 8/12", then
+"4/15" after a prompt "fix" — both false; the true rate was 15/15 with the original
+prompt. Before changing a prompt to fix a measured rate, open the trace
+(`response.done` → `output[].content[].text`) for one failing run and check the
+failure is really in the model. Print replies one per line with newlines replaced.

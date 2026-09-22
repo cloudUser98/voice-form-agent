@@ -216,6 +216,83 @@ new FormAgent({
 free text the agent uses to greet appropriately. If it's wrong, the visitor
 corrects it and the correction overwrites.
 
+## Known users
+
+When the integrator already knows who is filling the form, the form can start
+with their data. A **user schema** describes the integrator's user record; a form
+imports it as `user`, and one user schema serves every form that kind of user
+fills.
+
+```js
+// users/visitor.js
+export default {
+  key: 'persona_id',                     // identifies the record; never shown to the model
+  properties: {
+    visitante: { type: 'string', prefill: true, confirmOnly: true,
+                 beforeUpdate: 'Si registras la visita con otro nombre, también cambia en su perfil.' },
+    procedencia: { type: 'string', prefill: true },   // editable
+    documento:   { type: 'string', prefill: true, readOnly: true,
+                   beforeUpdate: 'El documento solo se cambia en recepción.' },
+    nivel_acceso: { type: 'string' },                 // private: goes nowhere
+  },
+};
+
+// forms/visit.js
+import visitor from '../users/visitor.js';
+export default { name: 'visit', user: visitor, /* ... */ };
+```
+
+A user field fills the form field **with the same name**, and only if it says
+`prefill: true`. Fields the form does not have are ignored; fields not marked
+`prefill` never reach the model.
+
+### Somebody arrives
+
+Every connector goes through the same door. An integrator sends
+`{type:'arrive', user}` (or `user` left out for a new user); the face detector
+does the same thing with what it recognised. A record that does not fit the user
+schema — or the form fields it prefills — is **refused**: `{type:'refused', key,
+problems}`, nobody is registered and no realtime session is opened. The camera
+repeats itself every few seconds; the same refusal is reported once.
+
+### Protected values
+
+Submitting the form may write back to the integrator's user database, so a
+visitor saying a different name to a kiosk must not silently rename their
+account. Protection applies to a value that was **actually prefilled** — for a
+new user every field is ordinary.
+
+| Field | Changed in conversation | Staff `correct()` |
+|---|---|---|
+| (default) | saved | allowed |
+| `confirmOnly` | proposed; `beforeUpdate` explained; saved only on a yes | allowed |
+| `readOnly` | refused; the agent says `beforeUpdate` | allowed |
+
+This is enforced by the engine, not asked of the model: `save_fields` on a
+`confirmOnly` value **cannot write it**. It becomes a proposal, a forced turn
+explains `beforeUpdate` in the agent's own words and asks, and only
+`confirm_change` with `accept: true` writes it. `submit_form` is refused while a
+proposal is open. The same value in other capitals or spacing is not a change,
+and going back to the profile's own value needs no confirmation.
+
+```
+🤖 Hola, Luis. ¿A quién vienes a visitar?
+👤 Oye, mi nombre completo es Luis Miguel, regístrame así.
+🤖 Si registramos la visita como "Luis Miguel", también se actualizará tu nombre
+   en el perfil de visitante. ¿Quieres que hagamos el cambio?
+👤 Sí, cámbialo.
+```
+
+What it replaced lives in `evidence` only — `{source:'heard', previous:'Luis',
+confirmed:true, confirmedWith:'Sí, cámbialo.'}` — for the screen, the trace and
+`done`. The model's board only ever carries the current value.
+
+### Handing the result back
+
+`done` carries `key`, and the form's submit receives it beside the data:
+`submit(data, { key })`. `key` is `null` for a new user. The data itself is
+shaped like the form; matching it to a user is the integrator's job.
+
 ## Asking the client for something
 
 Some values cannot be spoken. A photograph, a code printed by somebody else's
@@ -388,9 +465,11 @@ are JSON.
 | → | binary audio · `{type:'text', text}` · `{type:'interrupt'}` |
 | → | `{type:'correct', field, value}` — human overrules a value |
 | → | `{type:'detected', event}` — the room changed; this is what creates registrations |
+| → | `{type:'arrive', user?}` — somebody is here; `user` is their record, left out for a new user |
 | → | `{type:'answer', id, value}` — the client's reply to a `request` |
 | ← | binary audio |
 | ← | `{type:'request', id, kind, registration}` — the agent needs something only the client can get |
+| ← | `{type:'refused', key, problems}` — a user record did not fit the form's user schema |
 | ← | `{type:'ready'\|'waiting'\|'transcript'\|'state'\|'idle'\|'interrupted'\|'done'\|'error'}` |
 
 `mode:'text'` runs the same agent with typed input and no audio. That is what

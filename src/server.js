@@ -11,10 +11,15 @@
 //   client -> {type:'text', text}          typed input instead of speech
 //   client -> {type:'correct', registration?, field, value}  human overrules
 //   client -> {type:'detected', event}   a raw snapshot, if the client owns the camera
+//   client -> {type:'arrive', user?}   somebody is here to fill the form. `user` is
+//             their record, checked against the form's user schema; leave it
+//             out for a new user. A record that does not fit is refused and
+//             nobody is registered.
 //   client -> {type:'answer', id, value}   the reply to a server request
 //   server -> {type:'request', id, kind, ...}  do something only you can do, and
 //             answer with it. The agent waits, with no deadline, until you do.
 //   server -> {type:'waiting'}   armed; nobody is in the room yet
+//   server -> {type:'refused', key, problems}   a user record did not fit its schema
 //   server -> {type:'ended'}     everyone was dealt with; back to waiting
 //   server -> {type:'ready'|'transcript'|'state'|'idle'|'speaking'|'flush'|'done'|'error'}
 //   server -> {type:'debug', entry}   every event, when start asked for it
@@ -29,6 +34,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { FormAgent } from './agent.js';
 import { planFromSnapshot } from './detector.js';
 import { availableTools } from './prompt.js';
+import { arrival, userSchemaProblems } from './user.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const FORMS = new Map();
@@ -37,6 +43,10 @@ async function loadForm(name) {
     if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('bad form name'); // NOTE: Do we really need a regex?
     if (!FORMS.has(name)) {
         const mod = await import(new URL(`../forms/${name}.js`, import.meta.url)); // NOTE: Forms are javascript files
+        // A broken user schema is the integrator's mistake; it fails the start
+        // here instead of in front of somebody.
+        const problems = userSchemaProblems(mod.default);
+        if (problems.length) throw new Error(`${name}: ${problems.join('; ')}`);
         FORMS.set(name, mod.default);
     }
     return FORMS.get(name);
@@ -50,6 +60,9 @@ wss.on('connection', (ws) => {
     let agent = null;
     let connectionConfig = null;                  // what to build once somebody shows up
     let detector = null;
+    // A camera reports the same person every few seconds. A refused record is
+    // said once — the same refusal again is not news.
+    const refusalsSaid = new Set();
     
     const say = (obj) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(obj));
 
@@ -87,6 +100,7 @@ wss.on('connection', (ws) => {
         // A raw snapshot forwarded by a client that owns the camera itself. Allowed
         // before an agent exists — it is the thing that creates one.
         if (msg.type === 'detected') return anaunceDetection(msg.event);
+        if (msg.type === 'arrive') return arrive(msg.user ?? null);
 
         if (!agent) return say({ type: 'error', error: 'nobody has arrived at reception yet' });
         if (msg.type === 'text') return agent.sendText(msg.text);
@@ -116,6 +130,9 @@ wss.on('connection', (ws) => {
             agent ? agent.registrations : new Map()
         );
         
+        for (const person of roomState.arrived.filter((p) => p.refused)) refuse(person.personKey, person.refused);
+        roomState.arrived = roomState.arrived.filter((p) => !p.refused);
+
         if (!roomState.arrived.length) return; // No one in sight
 
         // NOTE: Isn't it better to build Agent at the start of the connection
@@ -126,6 +143,31 @@ wss.on('connection', (ws) => {
         // Fires ~400ms before the session is ready; roomUpdate queues it and drains
         // on session.updated.
         agent.roomUpdate(roomState);
+    }
+
+    /**
+     * Somebody is here, named by the integrator rather than seen by a camera.
+     * Checked before anything opens: a refused record costs no session.
+     */
+    function arrive(user) {
+        if (!connectionConfig) return say({ type: 'error', error: 'send start first' });
+        const checked = arrival(connectionConfig.form, user);
+        if (!checked.ok) return refuse(checked.key ?? null, checked.problems);
+
+        if (!agent) {
+            agent = build();
+            agent.start();
+        }
+        const r = agent.arrive(user);
+        if (!r.ok) refuse(checked.person.personKey, r.problems);
+    }
+
+    function refuse(key, problems) {
+        const said = `${key}|${problems.join('|')}`;
+        if (refusalsSaid.has(said)) return;
+        refusalsSaid.add(said);
+        console.log(`refused user ${key}: ${problems.join('; ')}`);
+        say({ type: 'refused', key, problems });
     }
 
     /**

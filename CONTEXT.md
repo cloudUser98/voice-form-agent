@@ -16,10 +16,12 @@ predecessor that collapsed under its own harness.
     src/validate.js    minimal JSON Schema checks
     src/tools.js       blocking / deferred / background decorators
     src/detector.js    adapter for the external face-recognition service
+    src/user.js        user schemas: load checks, record -> arrival, protection rules
     src/server.js      WebSocket transport (only file that opens ports)
     src/trace.js       JSONL of every event, per session
     forms/*.js         a form = persona paragraph + JSON Schema + submit()
     forms/api.js       the endpoints a form calls out to. The engine never imports it
+    users/*.js         user schemas a form imports as `user` (shared across forms)
     clients/           browser (mic + inspector) and CLI
     detector-sim.js    fake camera service; `npm run dev:detector`, press c/d/g
 
@@ -94,6 +96,19 @@ tool waits as long as the client takes, a skip leaves `codigo` on the board as
 an empty optional field, and the tool stays callable — so somebody who finds
 their code three questions later still gets to use it. `opening` means ask this
 first and do not nag; it never means this is your one chance.
+
+**Known users.** A form may import a user schema as `user` (`src/user.js`,
+`users/visitor.js`). An arrival is `{key, prefill, protect}` whichever connector
+produced it: `agent.arrive(record)` / `{type:'arrive', user}` for an integrator,
+`toPerson()` for the camera. A record that does not fit is refused outright — no
+registration, no session. Only `prefill: true` fields the form has are prefilled;
+the key and everything else stay out of the model. A prefilled value may be
+`readOnly` (refused, `beforeUpdate` says why) or `confirmOnly`: `#gate` takes it out
+of the patch on both write paths (`save_fields` and a tool's `fields`) and parks a
+proposal; `#proposalBeat` forces the explanation and question; only `confirm_change`
+writes it (`#settle`); `submit_form` refuses while one is open. `previous` and
+`confirmed` go to evidence only — never the board. `done` and `submit(data, {key})`
+carry `key`. Staff `correct()` bypasses all of it.
 
 **The room owns who exists.** The agent starts silent and holds no registrations.
 A camera snapshot (`people_detected`) creates them via `agent.roomUpdate()`. The

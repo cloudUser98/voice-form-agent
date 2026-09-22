@@ -53,7 +53,7 @@ export const withoutClient = (form) => ({
  * the transcript plus the final form state. This is the whole test strategy:
  * no mocks, no unit-testing a state machine that no longer exists.
  */
-export function converse(form, lines, { prefill, notes, label, timeoutMs = 90000, verbose, onRequest } = {}) {
+export function converse(form, lines, { prefill, notes, label, user, timeoutMs = 90000, verbose, onRequest } = {}) {
   return new Promise((resolve, reject) => {
     const agent = new FormAgent({ form, notes, mode: 'text' });
     const script = [...lines];
@@ -110,7 +110,9 @@ export function converse(form, lines, { prefill, notes, label, timeoutMs = 90000
     agent.start();
     // Nothing happens until the room says somebody is there. A scripted person
     // talking implies a person present, so put one there.
-    agent.once('open', () => agent.roomUpdate({
+    // `user` is somebody the integrator already knows: they arrive through the
+    // same door every connector uses, user schema and all.
+    agent.once('open', () => user ? agent.arrive(user) : agent.roomUpdate({
       arrived: [{ origin: label ? 'known' : 'unknown', personKey: label || null,
                   label: label || '', prefill: prefill || {}, notes: '' }],
     }));

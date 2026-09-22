@@ -7,8 +7,12 @@
 // The service sends full snapshots of who is in the room, never deltas, so a
 // departure is only ever the *absence* of somebody from the next snapshot.
 
+import { fromUser } from './user.js';
+
 /** The event field that identifies a person. Not data, not context. */
 const ID = 'persona_id';
+
+const context = (extra) => Object.entries(extra).map(([k, v]) => `${k}: ${v}`).join(', ');
 
 /**
  * Split a detected person into what the form can use and what it cannot.
@@ -16,6 +20,22 @@ const ID = 'persona_id';
  * per-form configuration — a hotel form works the same with no code change.
  */
 export function toPerson(person, form) {
+  // A form that declares its user reads the detection as that user's record:
+  // only what the user schema prefills lands in the form, and a record that
+  // does not fit is refused — the server reports it once and serves nobody.
+  if (form.user) {
+    const r = fromUser(form, person);
+    if (!r.ok) {
+      return {
+        origin: 'known', personKey: r.key ?? person[form.user.key] ?? null,
+        refused: r.problems, label: '', prefill: {}, notes: '',
+      };
+    }
+    // Whatever neither schema knows is context for the greeting, as it always
+    // was. What the user schema knows but does not prefill stays private.
+    return { ...r.person, notes: context(r.extra) };
+  }
+
   const props = form.schema.properties || {};
   const prefill = {};
   const extra = {};
@@ -30,7 +50,7 @@ export function toPerson(person, form) {
     personKey: person[ID] ?? null,
     label: prefill[form.labelFrom] || '',
     prefill,
-    notes: Object.entries(extra).map(([k, v]) => `${k}: ${v}`).join(', '),
+    notes: context(extra),
   };
 }
 

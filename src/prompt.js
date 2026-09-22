@@ -43,7 +43,7 @@ export function nextAction(form, { label, state }) {
 export function buildBoard(form, entries) {
   if (!entries.length) return '=== OPEN FORMS ===\n(none yet)';
 
-  const lines = entries.map(({ id, label, state, status, result, focused, steps }) => {
+  const lines = entries.map(({ id, label, state, status, result, focused, steps, proposals = [] }) => {
     const head = `${focused ? '▶ ' : '  '}${[id, label || '(unnamed)'].filter(Boolean).join(' ')}`;
     const filled = Object.entries(state.data)
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
@@ -60,11 +60,16 @@ export function buildBoard(form, entries) {
       tail = '   CLOSED';
     } else if (missing.length) {
       tail = `   missing: ${missing.join(', ')}`;
+    } else if (proposals.length) {
+      // Complete, but not ready: reading it back now would read the value they
+      // are still deciding whether to change.
+      tail = '   COMPLETE, but waiting on the change below before anything else.';
     } else {
       tail = `   COMPLETE ▸ NEXT: ${nextAction(form, { label, state })}`;
     }
 
-    return `${head}\n   filled: ${filled}${optionalLine(form, state, status)}${stepLine(status, steps)}\n${tail}`;
+    return `${head}\n   filled: ${filled}${optionalLine(form, state, status)}${stepLine(status, steps)}`
+         + `${proposalLine(status, proposals)}\n${tail}`;
   });
 
   return `=== OPEN FORMS ===\n${lines.join('\n')}${sharedGaps(entries)}${whatNext(entries)}`;
@@ -112,6 +117,21 @@ function stepLine(status, steps) {
   return `\n   awaiting their answer on: ${pending.join(', ')}`
        + `\n   → if they say yes, call ${pending.join(' / ')}. If they decline or have not got it, `
        + 'call skip_step. It is asked once; never press them twice.';
+}
+
+/**
+ * A change to a value from the person's own profile, proposed and not yet
+ * answered. Both values are stated because the question needs both; once it is
+ * answered the line goes, and the board goes back to carrying only what the
+ * field now holds. The old value is never kept here after that — a model told
+ * what a field used to be is a model that sometimes uses it.
+ */
+function proposalLine(status, proposals) {
+  if (status !== 'open' || !proposals.length) return '';
+  const changes = proposals.map((p) => `${p.field} ${JSON.stringify(p.from)} → ${JSON.stringify(p.to)}`);
+  return `\n   awaiting their confirmation to change: ${changes.join(', ')}`
+       + '\n   → nothing is changed yet. Call confirm_change with accept true only if they clearly say yes, '
+       + 'false if they say no or want to keep it.';
 }
 
 /**
@@ -318,12 +338,33 @@ export function buildTools(form, capabilities = null) {
         },
     };
 
+    // Only exists when some prefilled value needs a yes before it changes.
+    const confirm = {
+        type: 'function',
+        name: 'confirm_change',
+        description: 'Record their answer after you have explained what changing a value from their '
+            + 'registered profile means and asked them to confirm. Nothing changes until you call it.',
+        parameters: {
+            type: 'object',
+            properties: {
+                registration: { type: 'string', description: 'Whose change this is, e.g. "r1".' },
+                field: { type: 'string', description: 'The field, exactly as the status block spells it.' },
+                accept: { type: 'boolean', description: 'true only if they clearly said yes; false if they said no or want to keep it.' },
+                quote: { type: 'string', description: 'The words they answered with.' },
+            },
+            required: ['registration', 'field', 'accept'],
+        },
+    };
+
     const tools = availableTools(form, capabilities);
     const skippable = tools.some((t) => t.opening);
+    const confirmable = Object.values(form.user?.properties || {})
+        .some((spec) => spec.prefill && spec.confirmOnly && !spec.readOnly);
 
     return [
         focus, save, submit, list, close,
         ...(skippable ? [skip] : []),
+        ...(confirmable ? [confirm] : []),
         ...tools.map((t) => t.definition),
     ];
 }

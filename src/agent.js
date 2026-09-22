@@ -5,6 +5,8 @@ import { FormState } from './form-state.js';
 import { modeOf, withTimeout } from './tools.js';
 import { openTrace } from './trace.js';
 import { resolveLanguage, languageBlock, transcriptionConfig, DEFAULT_LOCALE } from './language.js';
+import { userSchemaProblems, arrival, explanation, sameValue } from './user.js';
+import { checkField, isEmpty } from './validate.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 
@@ -48,6 +50,8 @@ export class FormAgent extends EventEmitter {
         super();
         if (!form) throw new Error('FormAgent needs a form definition');
         if (!apiKey) throw new Error('FormAgent needs an OpenAI API key');
+        const userProblems = userSchemaProblems(form);
+        if (userProblems.length) throw new Error(`${form.name || 'form'}: ${userProblems.join('; ')}`);
     
         this.form = form;
         this.language = resolveLanguage(language);
@@ -145,6 +149,8 @@ export class FormAgent extends EventEmitter {
 
     const outcome = reg.state.correct(field, value);
     if (!outcome.ok) return outcome;
+    // Staff overrule; a change the visitor was about to be asked about is moot.
+    reg.proposals.delete(field);
 
     const cleared = reg.state.data[field] === undefined;
     const who = this.#labelOf(reg) || reg.id;
@@ -202,6 +208,28 @@ export class FormAgent extends EventEmitter {
     this.pending.delete(id);
     resolve(value);
     return true;
+  }
+
+  /**
+   * Somebody is here, and this is their user record — or null for a new user.
+   *
+   * A record that does not fit the form's user schema is refused outright and
+   * nobody is registered: the integrator's data is wrong, and prefilling part
+   * of it would hide that. The same person twice is refused too, so a
+   * connector that repeats itself cannot open a second form for them.
+   */
+  arrive(record = null) {
+    const r = arrival(this.form, record);
+    if (!r.ok) {
+      this.trace.write({ dir: 'in', type: 'user.refused', key: r.key ?? null, problems: r.problems });
+      return { ok: false, problems: r.problems };
+    }
+    const key = r.person.personKey;
+    if (key !== null && [...this.registrations.values()].some((g) => g.personKey === key && g.status === 'open')) {
+      return { ok: false, problems: [`${key}: already has an open registration`] };
+    }
+    this.roomUpdate({ arrived: [r.person] });
+    return { ok: true };
   }
 
   /**
@@ -327,7 +355,7 @@ export class FormAgent extends EventEmitter {
   
 
   /** Create a registration. Only ever called from roomUpdate. */
-  #open({ label = '', prefill = {}, origin = 'unknown', personKey = null } = {}) {
+  #open({ label = '', prefill = {}, protect = {}, origin = 'unknown', personKey = null } = {}) {
       const id = `r${this.nextId++}`; // Creates an ID like r1, r2, rn...
       
       /** @type {Registration} */
@@ -341,6 +369,11 @@ export class FormAgent extends EventEmitter {
           result: null,
           beatDone: false,
           verified: new Map(),              // field -> the exact value that passed
+          // Prefilled values the conversation may not simply overwrite, and the
+          // changes to them that are waiting for a yes. See src/user.js.
+          protect,                          // field -> { readOnly, confirmOnly, beforeUpdate, value }
+          proposals: new Map(),             // field -> { from, to, quote, asked }
+          beatHeld: false,                  // completed while a change was pending
           attachments: new Map(),           // field -> the bytes its token stands for
           // A question that is asked once and may be turned down. Seeded only
           // with the steps THIS client can actually serve, so a kiosk with no
@@ -493,6 +526,8 @@ export class FormAgent extends EventEmitter {
       status: r.status,
       result: r.result,
       steps: r.steps,
+      // Only what the question needs: the value now and the one they asked for.
+      proposals: [...r.proposals].map(([field, p]) => ({ field, from: p.from, to: p.to })),
       focused: r.id === this.focused,
     }));
   }
@@ -518,6 +553,28 @@ export class FormAgent extends EventEmitter {
     return this.#beat(
       `${nextAction(this.form, { label: this.#labelOf(reg), state: reg.state })}\n\n`
       + `Datos registrados: ${JSON.stringify(reg.state.snapshot().data)}`);
+  }
+
+  /**
+   * Somebody asked to change a value from their profile. Nothing has been
+   * written; this is the turn that tells them what the change means and asks.
+   * `beforeUpdate` is the integrator's reason, put in the agent's own words and
+   * language — it is guidance, not a script to read out.
+   */
+  #proposalBeat(reg) {
+    const who = this.#labelOf(reg) || 'The visitor';
+    const lines = [...reg.proposals]
+      .filter(([, p]) => !p.asked)
+      .map(([field, p]) => {
+        p.asked = true;
+        return `- ${field}: from ${JSON.stringify(p.from)} to ${JSON.stringify(p.to)}. `
+          + `What changing it means: ${explanation(reg.protect[field])}`;
+      });
+    return this.#beat(
+      `${who} (${reg.id}) asked to change something that comes from their registered profile. `
+      + `NOTHING has been changed yet.\n${lines.join('\n')}\n\n`
+      + 'In ONE or TWO short sentences, explain in your own words what making this change means, '
+      + 'then ask them to confirm that they want it. Do not say it is done.');
   }
 
   /**
@@ -718,6 +775,96 @@ export class FormAgent extends EventEmitter {
    }
 
   /**
+   * A value from the user's own profile is not the conversation's to overwrite.
+   *
+   * Submitting this form may write back to the integrator's user database, so
+   * "my name is Luis Miguel" to a kiosk that knows him as Luis would rename his
+   * account. Asking the model to warn first is not enough — the prompt also
+   * tells it to save the moment it hears something, and on some turns that
+   * instruction wins. So the write itself is what is stopped: a protected field
+   * is taken out of the patch here, on the only road a conversational value
+   * travels, before anything is saved.
+   *
+   *   readOnly     refused, and the refusal carries `beforeUpdate` so the agent
+   *                can say why.
+   *   confirmOnly  becomes a proposal. Nothing is written until confirm_change
+   *                comes back with a yes — see #proposalBeat for the asking.
+   *
+   * The same value again is not a change, whatever its capitals or spacing,
+   * and going back to what the profile says is never one either.
+   *
+   * Mutates `fields`. Returns what was refused and what now awaits a yes.
+   */
+  #gate(reg, fields, quotes = {}) {
+    const problems = [];
+    const proposed = [];
+
+    for (const field of Object.keys(fields)) {
+      const rule = reg.protect[field];
+      const next = fields[field];
+      if (!rule || isEmpty(next)) continue;
+
+      const current = reg.state.data[field];
+      // Nothing changes. Dropped rather than saved, so a value the visitor
+      // merely repeated keeps saying it came from their profile.
+      if (sameValue(next, current)) { delete fields[field]; continue; }
+      if (sameValue(next, rule.value)) continue;            // back to the profile's own value
+
+      delete fields[field];
+      if (rule.readOnly) { problems.push(`${field}: ${explanation(rule)}`); continue; }
+
+      // Never ask somebody to confirm a value that would be refused anyway.
+      const invalid = checkField(field, this.form.schema.properties[field], next);
+      if (invalid.length) { problems.push(...invalid); continue; }
+
+      const quote = typeof quotes[field] === 'string' && quotes[field].trim() ? quotes[field].trim() : null;
+      reg.proposals.set(field, { from: current, to: next, quote, asked: false });
+      proposed.push(field);
+      this.trace.write({ dir: 'tool', type: 'change.proposed', registration: reg.id, field, from: current, to: next });
+    }
+
+    return { problems, proposed };
+  }
+
+  /**
+   * The answer to a proposal. A yes writes the value exactly the way a spoken
+   * value is written — schema, then `verify` — and records, for the people
+   * reading the screen, what it replaced. A no leaves the profile's value alone.
+   *
+   * What it replaced goes in `evidence` and nowhere else. The board carries
+   * only the value as it now stands: telling the model what a field used to be
+   * is how it ends up using the old one.
+   */
+  async #settle(reg, field, accept, quote) {
+    const proposal = reg.proposals.get(field);
+    reg.proposals.delete(field);
+    this.trace.write({ dir: 'tool', type: 'change.answered', registration: reg.id, field, accept });
+    if (!accept) return { changed: [], problems: [] };
+
+    const before = { value: reg.state.data[field], evidence: reg.state.evidence[field] };
+    const { problems, changed } = reg.state.save(
+      { [field]: proposal.to },
+      proposal.quote ? { [field]: proposal.quote } : {},
+    );
+    await this.#verify(reg, changed, problems);
+
+    if (changed.includes(field)) {
+      reg.state.evidence[field] = {
+        ...reg.state.evidence[field],
+        previous: proposal.from,
+        confirmed: true,
+        ...(typeof quote === 'string' && quote.trim() ? { confirmedWith: quote.trim() } : {}),
+      };
+    } else {
+      // The world refused the new value. That must not cost them the one on
+      // their profile, which is what a plain `verify` refusal would do.
+      reg.state.data[field] = before.value;
+      reg.state.evidence[field] = before.evidence;
+    }
+    return { changed, problems };
+  }
+
+  /**
    * Take what a tool brought back and put it where it belongs.
    *
    * Two kinds of thing can come back, and they go opposite ways.
@@ -766,13 +913,18 @@ export class FormAgent extends EventEmitter {
       const refused = Object.keys(fields).filter((f) => this.form.schema.properties?.[f]?.client);
       for (const f of refused) delete fields[f];
 
+      // A scanned appointment is no more entitled to rename somebody than a
+      // spoken sentence is.
+      const gated = this.#gate(reg, fields);
       const { problems, changed } = reg.state.save(fields, {}, { source: 'client', via: name });
       for (const f of refused) problems.push(`${f}: not yours to fill; the kiosk captures it`);
+      problems.push(...gated.problems);
       await this.#verify(reg, changed, problems);
 
       Object.assign(out, {
         saved: changed,
         missing: reg.state.missing(),
+        ...(gated.proposed.length ? { pending_confirmation: gated.proposed } : {}),
         ...(problems.length ? { rejected: problems } : {}),
       });
     }
@@ -991,11 +1143,28 @@ export class FormAgent extends EventEmitter {
            return this.#endSession(justFinished);
        }
 
+       // A form that filled up while a change to it is still undecided is not
+       // ready to be read back. Its beat waits for the answer.
+       for (const r of this.registrations.values()) {
+           if (r.status === 'open' && r.state.complete && !r.beatDone && r.proposals.size
+               && !before.get(r.id)?.complete) r.beatHeld = true;
+       }
+
+       // Somebody asked to change a value from their profile. Asking is forced
+       // for the reason read-back is: a board line can be answered with a tool
+       // call, and then the warning is never heard.
+       const asking = [...this.registrations.values()].find(
+           (r) => r.status === 'open' && [...r.proposals.values()].some((p) => !p.asked),
+       );
+       if (asking) return this.#requestResponse(this.#proposalBeat(asking));
+
        // Whichever registration just became complete gets its forced beat.
        const justCompleted = [...this.registrations.values()].find(
-           (r) => r.status === 'open' && r.state.complete && !r.beatDone && !before.get(r.id)?.complete,
+           (r) => r.status === 'open' && r.state.complete && !r.beatDone && !r.proposals.size
+               && (!before.get(r.id)?.complete || r.beatHeld),
        );
        if (justCompleted) {
+           justCompleted.beatHeld = false;
            const beat = this.#completionBeat(justCompleted);
            if (beat) {
                justCompleted.beatDone = true;
@@ -1054,8 +1223,10 @@ export class FormAgent extends EventEmitter {
                .filter((f) => this.form.schema.properties?.[f]?.client);
            for (const f of refused) delete fields[f];
 
+           const gated = this.#gate(reg, fields, args.quotes || {});
            const { problems, changed } = reg.state.save(fields, args.quotes || {}, { addressing });
            for (const f of refused) problems.push(`${f}: not yours to fill; the kiosk captures it`);
+           problems.push(...gated.problems);
            await this.#verify(reg, changed, problems);
            
            this.#publish(reg);
@@ -1065,6 +1236,7 @@ export class FormAgent extends EventEmitter {
                label: this.#labelOf(reg),
                saved: changed,
                missing: reg.state.missing(),
+               ...(gated.proposed.length ? { pending_confirmation: gated.proposed } : {}),
                ...(problems.length ? { rejected: problems } : {}),
            };
        }
@@ -1072,18 +1244,26 @@ export class FormAgent extends EventEmitter {
        if (name === 'submit_form') {
            const missing = reg.state.missing();
            if (missing.length) return { ok: false, registration: reg.id, missing };
+           // Submitting now would send the profile's value while they are still
+           // deciding whether to change it.
+           if (reg.proposals.size) {
+               return { ok: false, registration: reg.id, pending_confirmation: [...reg.proposals.keys()] };
+           }
            try {
                const snapshot = reg.state.snapshot();
                // Tokens go back to being what they stand for. This is the only
                // place the real bytes leave `attachments` — the snapshot the
                // screen and the trace get still carries the token.
                const payload = { ...snapshot.data, ...Object.fromEntries(reg.attachments) };
-               const result = (await this.#call(this.form.submit, payload)) || {};
+               // `key` is how the integrator finds the user this record belongs
+               // to. It rides beside the data, never in it: the model never sees it.
+               const key = reg.personKey ?? null;
+               const result = (await this.#call(this.form.submit, payload, { key })) || {};
                reg.status = 'submitted';
                reg.result = result;
                this.#advanceFocus(reg);
                this.emit('done', {
-                   registration: reg.id, label: this.#labelOf(reg), ...snapshot, result,
+                   registration: reg.id, label: this.#labelOf(reg), key, ...snapshot, result,
                });
                return { ok: true, registration: reg.id, ...result };
            } catch (err) {
@@ -1107,6 +1287,28 @@ export class FormAgent extends EventEmitter {
            this.trace.write({ dir: 'tool', type: 'step.skipped', registration: reg.id, step, reason: args.reason });
            this.#scheduleBoard();
            return { ok: true, registration: reg.id, step, missing: reg.state.missing() };
+       }
+
+       if (name === 'confirm_change') {
+           const field = args.field;
+           if (!reg.proposals.has(field)) {
+               return {
+                   ok: false,
+                   error: `nothing is waiting for confirmation on ${field ?? '(missing)'}`,
+                   pending_confirmation: [...reg.proposals.keys()],
+               };
+           }
+           const accept = args.accept === true;
+           const { changed, problems } = await this.#settle(reg, field, accept, args.quote);
+           this.#publish(reg);
+           return {
+               ok: true,
+               registration: reg.id,
+               field,
+               saved: changed,
+               missing: reg.state.missing(),
+               ...(problems.length ? { rejected: problems } : {}),
+           };
        }
 
        if (name === 'close_registration') {
