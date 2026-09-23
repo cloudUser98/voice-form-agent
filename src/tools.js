@@ -23,7 +23,12 @@
 //   timeoutMs    give up waiting after this (default 40s). `Infinity` waits for
 //                as long as it takes — for a tool whose slowness is a person
 //                rather than a server, and where giving up would be wrong.
-//   coverAfterMs only bother speaking if it takes longer than this (default 400ms)
+//   coverAfterMs only bother speaking after this much SILENCE (default 400ms).
+//                Counted from when the sentence that called the tool has
+//                finished playing, not from the call — the visitor is not
+//                waiting while they are still listening. A cover the tool
+//                outruns is taken back before anyone hears it (agent.js
+//                #withdraw), so a short value costs nothing when the tool is fast.
 //
 // `done` and `fail` do nothing for `blocking`, because there the real result
 // and any error travel back to the model as the tool's own output and it

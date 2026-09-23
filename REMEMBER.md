@@ -77,3 +77,18 @@ explanation and loses the question. That produced a confident "asks only 8/12", 
 prompt. Before changing a prompt to fix a measured rate, open the trace
 (`response.done` → `output[].content[].text`) for one failing run and check the
 failure is really in the model. Print replies one per line with newlines replaced.
+
+## A cover sentence is late by construction
+
+`response.create` → first audio delta is 0.7 s at p50 and 1.2 s at p90 (kiosk
+traces, September 2026). A cover requested 400 ms into a tool that takes 0.5–1.4 s
+comes out *after* the tool is done: "espera un momento" after the save, "acerca
+tu código" after it was read. Two things fix it, and neither is a bigger
+`coverAfterMs`:
+
+- the delay counts from **silence** — the end of what the visitor is still
+  hearing — not from the call (`#stillPlayingMs`, same arithmetic as `#finish`);
+- a cover the tool outruns is **withdrawn** (`#withdraw`): dropped if still
+  waiting, `response.cancel {response_id}` if sent but silent, its items deleted.
+  Once audio has started it plays out. `response_cancel_not_active` is expected
+  noise from that race and is swallowed.

@@ -75,7 +75,7 @@ export class FormAgent extends EventEmitter {
         this.speaking = false;
         this.responsePending = false;       // we asked for a response, none finished yet
         this.waiting = [];                  // what wanted the floor while it was taken
-        this.flight = [];                   // responses under way, oldest first: {id, cut}
+        this.flight = [];                   // responses under way, oldest first — see #requestResponse
         this.busyDepth = 0;                // how many blocking tools hold the floor
         this.audio = null;                  // the response currently being spoken
         this.truncatedItem = null;          // its deltas are stale; drop them
@@ -352,20 +352,30 @@ export class FormAgent extends EventEmitter {
    * are two different things that have to be said. A plain request only asks
    * that the model get the floor, which any response does, so it is dropped
    * once anything else is waiting or anything is sent.
+   *
+   * `tag` marks a request its caller may take back — a cover sentence, whose
+   * tool can finish before it is ever heard. See #withdraw.
+   *
+   * Every response sent is recorded in `flight` until its response.done:
+   *   id         the server's, once response.created says what it is
+   *   cut        #cutOff abandoned it; its response.done does not free the floor
+   *   tag        who asked for it
+   *   audible    output for it has started reaching the client
+   *   withdrawn  its caller took it back before anything was heard
    */
-  #requestResponse(overrides = null) {
+  #requestResponse(overrides = null, tag = null) {
     if (this.responsePending) {
       if (overrides) {
         this.waiting = this.waiting.filter((w) => w.overrides);
-        this.waiting.push({ overrides });
+        this.waiting.push({ overrides, tag });
       } else if (!this.waiting.length) {
-        this.waiting.push({ overrides: null });
+        this.waiting.push({ overrides: null, tag });
       }
       return;
     }
     this.responsePending = true;
     this.waiting = this.waiting.filter((w) => w.overrides);
-    this.flight.push({ id: null, cut: false });
+    this.flight.push({ id: null, cut: false, tag, audible: false, withdrawn: false });
     this.#send(overrides ? { type: 'response.create', response: overrides } : { type: 'response.create' });
   }
 
@@ -373,8 +383,51 @@ export class FormAgent extends EventEmitter {
   #next() {
     const w = this.waiting.shift();
     if (!w) return false;
-    this.#requestResponse(w.overrides);
+    this.#requestResponse(w.overrides, w.tag);
     return true;
+  }
+
+  /**
+   * Take back a response nobody has heard yet.
+   *
+   * A cover sentence is asked for because a tool looked slow, and the realtime
+   * model takes 0.5–1.5 s to start speaking. A tool that finishes inside that
+   * window used to be followed by "un momento" anyway — "please wait" after the
+   * wait was over, "bring your code to the reader" after it had been read. So
+   * the tool withdraws its own cover when it finishes: still waiting, it never
+   * goes out; sent but silent, it is cancelled. Once its audio has started it is
+   * left alone, because cutting a sentence off mid-word is worse than a
+   * sentence that is a moment late.
+   *
+   * Nothing of a withdrawn response reaches the client, and its items are
+   * deleted from the conversation, so the model does not believe it said
+   * something nobody heard. Whatever was waiting behind it still goes next.
+   */
+  #withdraw(tag) {
+    this.waiting = this.waiting.filter((w) => w.tag !== tag);
+    const r = this.flight.find((f) => f.tag === tag && !f.cut);
+    if (!r || r.audible || r.withdrawn) return;
+    r.withdrawn = true;
+    this.trace.write({ dir: 'agent', type: 'cover.withdrawn', response: r.id });
+    // Until response.created names it there is nothing to cancel; it is
+    // cancelled the moment it does.
+    if (r.id) this.#send(r.id === '?' ? { type: 'response.cancel' } : { type: 'response.cancel', response_id: r.id });
+  }
+
+  /** The response a streamed delta belongs to; without an id, the newest. */
+  #flightOf(responseId) {
+    return (responseId && this.flight.find((f) => f.id === responseId)) || this.flight.at(-1) || null;
+  }
+
+  /**
+   * How much of what has already been generated the visitor has still to hear.
+   * Generation outruns playback, so the sentence that called a tool is often
+   * still coming out of the speaker when the tool starts. Same arithmetic as
+   * #finish; zero in text mode.
+   */
+  #stillPlayingMs() {
+    if (!this.spokenAt) return 0;
+    return Math.max(0, this.spokenAt + (this.spokenBytes / (24000 * 2)) * 1000 - Date.now());
   }
 
   /**
@@ -756,22 +809,30 @@ export class FormAgent extends EventEmitter {
     // Only the outermost blocking tool announces the floor, so a client sees one
     // pair of events per wait however many checks that wait turns out to contain.
     if (this.busyDepth++ === 0) this.emit('busy', true);
+    const cover = Symbol('cover');
     try {
       // Only cover the wait if there is a wait worth covering — a 50ms tool
-      // does not need "un momento".
+      // does not need "un momento". And the wait is the SILENCE, not the tool:
+      // the clock starts once the sentence that called the tool has finished
+      // playing, the way LiveKit's with_filler counts from an idle session.
+      // "Dame un momento para finalizar tu registro" already covers a one-second
+      // submit; a second "espera un momento" after it is the wait said twice.
+      let timer;
       const finishedFast = await Promise.race([
         work.then(() => true, () => true),
-        new Promise((r) => setTimeout(() => r(false), meta.coverAfterMs)),
+        new Promise((r) => { timer = setTimeout(() => r(false), meta.coverAfterMs + this.#stillPlayingMs()); }),
       ]);
+      clearTimeout(timer);
       if (!finishedFast) {
         // A `say` function gets the tool's own arguments, so the cover sentence
         // can name what is being looked up rather than stalling generically.
         const say = typeof meta.say === 'function' ? meta.say(...args) : meta.say;
         this.#requestResponse(this.#beat(say
-          || 'Tell them you are dealing with it and to wait a moment. Do NOT say it is done.'));
+          || 'Tell them you are dealing with it and to wait a moment. Do NOT say it is done.'), cover);
       }
       return await work;
     } finally {
+      this.#withdraw(cover);
       if (--this.busyDepth === 0) this.emit('busy', false);
     }
   }
@@ -1080,13 +1141,19 @@ export class FormAgent extends EventEmitter {
                return;
 
            case 'error':
+               // Cancelling a cover that finished generating a moment earlier.
+               // Harmless — the server says so and carries on — and not something
+               // the client should be told about.
+               if (e.error?.code === 'response_cancel_not_active') return;
                return this.emit('error', new Error(e.error?.message || 'realtime error'));
 
            case 'conversation.item.input_audio_transcription.completed':
                return this.emit('transcript', { role: 'user', text: e.transcript });
 
-           case 'response.created':
-               this.#started(e.response);
+           case 'response.created': {
+               const r = this.#started(e.response);
+               // Withdrawn before the server had named it; cancel it now.
+               if (r?.withdrawn && e.response?.id) this.#send({ type: 'response.cancel', response_id: e.response.id });
                this.speaking = true;
                // Counted per response, not per item: the goodbye is measured to know
                // when it has finished playing.
@@ -1094,6 +1161,13 @@ export class FormAgent extends EventEmitter {
                this.spokenAt = 0;
                this.emit('speaking', true);
                return;
+           }
+
+           case 'response.output_text.delta': {
+               const r = this.#flightOf(e.response_id);
+               if (r && !r.withdrawn) r.audible = true;
+               return;
+           }
 
            case 'response.output_item.added':
                this.audio = { itemId: e.item?.id, firstAt: 0, bytes: 0 };
@@ -1101,6 +1175,9 @@ export class FormAgent extends EventEmitter {
 
            case 'response.output_audio.delta': {
                if (e.item_id && e.item_id === this.truncatedItem) return;   // stale, cut already
+               const r = this.#flightOf(e.response_id);
+               if (r?.withdrawn) return;                                    // taken back unheard
+               if (r) r.audible = true;
                const buf = Buffer.from(e.delta, 'base64');
                if (this.audio) {
                    if (!this.audio.firstAt) this.audio.firstAt = Date.now();
@@ -1114,11 +1191,21 @@ export class FormAgent extends EventEmitter {
            case 'response.done': { // NOTE: This is where tools are called by the model
                // A response we cut off finishing is not the floor coming free:
                // the interjection that replaced it is already under way.
-               if (this.#landed(e.response)?.cut) return this.#emitSaid(e.response);
+               const r = this.#landed(e.response);
+               if (r?.cut) return this.#emitSaid(e.response);
                this.speaking = false;
                this.responsePending = false;
                this.emit('speaking', false);
-               
+
+               // A withdrawn cover said nothing anyone heard. Out of the
+               // conversation it goes, and on with whatever was waiting.
+               if (r?.withdrawn) {
+                   for (const item of e.response?.output || []) {
+                       if (item.id) this.#send({ type: 'conversation.item.delete', item_id: item.id });
+                   }
+                   return this.#onResponseDone({ ...e.response, output: [] });
+               }
+
                return this.#onResponseDone(e.response); // NOTE: It's returning a promise!
            }
        }
@@ -1130,10 +1217,12 @@ export class FormAgent extends EventEmitter {
     * detection starts those — is simply recorded.
     */
    #started(response) {
-       const id = response?.id ?? null;
+       const id = response?.id ?? '?';
        const mine = this.flight.find((r) => r.id === null);
-       if (mine) mine.id = id ?? '?';
-       else this.flight.push({ id: id ?? '?', cut: false });
+       if (mine) { mine.id = id; return mine; }
+       const theirs = { id, cut: false, tag: null, audible: false, withdrawn: false };
+       this.flight.push(theirs);
+       return theirs;
    }
 
    /**
