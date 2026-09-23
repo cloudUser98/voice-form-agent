@@ -158,5 +158,9 @@ subject of the test, the way `tool-modes` names `anfitrion` to test `verify`.
   without it a beat is the turn where the model drifts into English or loses
   its accent. Accent is prompt-steered only; the API has no language parameter.
 - All `response.create` calls go through one choke point; two in flight is an error.
+  A request made while one is in flight waits in `waiting` *with its instructions* —
+  a forced turn that waited as a bare flag used to go out as a plain response.
+  A response `#cutOff` abandoned still sends `response.done`; it is marked `cut` and
+  does not free the floor.
 - A stale `node src/server.js` on port 8787 will answer with old code and look
   like a phantom bug. Check `ps aux` first.

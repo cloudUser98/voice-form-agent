@@ -74,9 +74,9 @@ export class FormAgent extends EventEmitter {
         this.sessionId = sessionId;
         this.speaking = false;
         this.responsePending = false;       // we asked for a response, none finished yet
-        this.queued = false;                // something wanted the floor while busy
-        this.pendingNudge = false;          // a room event that still needs a reply
-        this.busyDepth = 0;                 // how many blocking tools hold the floor
+        this.waiting = [];                  // what wanted the floor while it was taken
+        this.flight = [];                   // responses under way, oldest first: {id, cut}
+        this.busyDepth = 0;                // how many blocking tools hold the floor
         this.audio = null;                  // the response currently being spoken
         this.truncatedItem = null;          // its deltas are stale; drop them
         this.ending = false;                // the last person is being said goodbye to
@@ -340,12 +340,41 @@ export class FormAgent extends EventEmitter {
    * sending response.create and hearing back there was a window where a second
    * request slipped through and the server rejected it with "Conversation
    * already has an active response in progress".
+   *
+   * While a response is in flight a request waits its turn — and it waits with
+   * what it asked for. It used to be a single `queued` flag, which remembered
+   * that somebody wanted the floor and forgot what they wanted to say: a
+   * proposal beat asked for while a cover sentence was still playing went out
+   * as a plain response, the explanation was never given, and because the
+   * proposal was already marked asked it never would be.
+   *
+   * So a beat is kept, in order, and never merged or overwritten — two beats
+   * are two different things that have to be said. A plain request only asks
+   * that the model get the floor, which any response does, so it is dropped
+   * once anything else is waiting or anything is sent.
    */
   #requestResponse(overrides = null) {
-    if (this.responsePending) { this.queued = true; return; }
+    if (this.responsePending) {
+      if (overrides) {
+        this.waiting = this.waiting.filter((w) => w.overrides);
+        this.waiting.push({ overrides });
+      } else if (!this.waiting.length) {
+        this.waiting.push({ overrides: null });
+      }
+      return;
+    }
     this.responsePending = true;
-    this.queued = false;
+    this.waiting = this.waiting.filter((w) => w.overrides);
+    this.flight.push({ id: null, cut: false });
     this.#send(overrides ? { type: 'response.create', response: overrides } : { type: 'response.create' });
+  }
+
+  /** Give the floor to whatever has been waiting for it. False if nothing was. */
+  #next() {
+    const w = this.waiting.shift();
+    if (!w) return false;
+    this.#requestResponse(w.overrides);
+    return true;
   }
 
   /**
@@ -512,7 +541,13 @@ export class FormAgent extends EventEmitter {
     this.#send({ type: 'response.cancel' });
     this.speaking = false;
     this.responsePending = false;
-    this.queued = false;
+    // Whatever was under way has been abandoned. Its response.done still
+    // arrives, after the interjection has already asked for the floor, and must
+    // not be read as the floor coming free — see #landed.
+    for (const r of this.flight) r.cut = true;
+    // The interjection answers a plain request. A beat still has to be said,
+    // and is — after the interjection's own turn.
+    this.waiting = this.waiting.filter((w) => w.overrides);
     this.audio = null;
     this.emit('flush');                 // client empties its playback queue
     this.emit('speaking', false);
@@ -1051,6 +1086,7 @@ export class FormAgent extends EventEmitter {
                return this.emit('transcript', { role: 'user', text: e.transcript });
 
            case 'response.created':
+               this.#started(e.response);
                this.speaking = true;
                // Counted per response, not per item: the goodbye is measured to know
                // when it has finished playing.
@@ -1075,16 +1111,44 @@ export class FormAgent extends EventEmitter {
                return this.emit('audio', buf);
            }
 
-           case 'response.done': // NOTE: This is where tools are called by the model
+           case 'response.done': { // NOTE: This is where tools are called by the model
+               // A response we cut off finishing is not the floor coming free:
+               // the interjection that replaced it is already under way.
+               if (this.#landed(e.response)?.cut) return this.#emitSaid(e.response);
                this.speaking = false;
                this.responsePending = false;
                this.emit('speaking', false);
                
                return this.#onResponseDone(e.response); // NOTE: It's returning a promise!
+           }
        }
    }
 
-   async #onResponseDone(response) {
+   /**
+    * A response the server has started. Ours are matched to the oldest request
+    * still waiting for an id; one we never asked for — the server's own turn
+    * detection starts those — is simply recorded.
+    */
+   #started(response) {
+       const id = response?.id ?? null;
+       const mine = this.flight.find((r) => r.id === null);
+       if (mine) mine.id = id ?? '?';
+       else this.flight.push({ id: id ?? '?', cut: false });
+   }
+
+   /**
+    * A response finished: take it off the list and say which one it was. An id
+    * nothing matches (a replay, or a test that skips response.created) is taken
+    * to be the oldest one whose id we never learned.
+    */
+   #landed(response) {
+       let i = this.flight.findIndex((r) => r.id === response?.id);
+       if (i < 0) i = this.flight.findIndex((r) => r.id === null || r.id === '?');
+       return i < 0 ? null : this.flight.splice(i, 1)[0];
+   }
+
+   /** What the agent said in this response, for anyone keeping a transcript. */
+   #emitSaid(response) {
        for (const item of response?.output || []) {
            if (item.type === 'message') {
                const text = (item.content || [])
@@ -1094,6 +1158,10 @@ export class FormAgent extends EventEmitter {
                if (text) this.emit('transcript', { role: 'agent', text });
            }
        }
+   }
+
+   async #onResponseDone(response) {
+       this.#emitSaid(response);
 
        // The session is on its way out: either that turn was the goodbye, or it
        // was something holding the floor that the goodbye has been waiting for.
@@ -1101,10 +1169,9 @@ export class FormAgent extends EventEmitter {
 
        const calls = (response?.output || []).filter((i) => i.type === 'function_call');
        if (!calls.length) {
-           // A room event that arrived mid-sentence has been waiting for the floor.
-           if (this.pendingNudge) { this.pendingNudge = false; return this.#requestResponse(); }
-           if (this.queued) { this.queued = false; return this.#requestResponse(); }
-           if (this.busy) return;                           // a blocking tool holds the floor
+           // Something asked for the floor while this response had it.
+           if (this.#next()) return;
+           if (this.busy) return;                          // a blocking tool holds the floor
            return this.emit('idle');                        // agent finished its turn
        }
 
@@ -1129,7 +1196,6 @@ export class FormAgent extends EventEmitter {
        // The board must be current BEFORE the model speaks again: this is the
        // turn where a form may have just become complete.
        this.#flushBoard();
-       this.pendingNudge = false;
 
        // Somebody was finished with this turn and others are still waiting.
        // Checked first: it subsumes the completion case for the person handed to.
