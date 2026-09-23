@@ -182,3 +182,37 @@ export function sameValue(a, b) {
     : `j:${JSON.stringify(v)}`);
   return norm(a) === norm(b);
 }
+
+/**
+ * Was `quote` really said, somewhere in `said`?
+ *
+ * The model reports the words a visitor answered with; the engine holds that
+ * report against what was transcribed. Both are rough copies of the same
+ * speech — the model heard the audio, the transcriber wrote it down — so
+ * accents, capitals and punctuation are ignored, and a longer quote may miss
+ * one word in five. What it may not do is be somebody else's sentence: every
+ * word it keeps must appear in `said`, in order. Three words or fewer must all
+ * be there.
+ */
+export function grounded(quote, said) {
+  const words = (v) => (typeof v === 'string' ? v : '')
+    .normalize('NFD').replace(/\p{M}/gu, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim().split(' ').filter(Boolean);
+  const q = words(quote);
+  const s = words(said);
+  if (!q.length || !s.length) return false;
+
+  // Longest common subsequence, by words.
+  let prev = new Array(s.length + 1).fill(0);
+  for (const w of q) {
+    const cur = [0];
+    for (let j = 1; j <= s.length; j++) {
+      cur[j] = w === s[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  const kept = prev[s.length];
+  return q.length <= 3 ? kept === q.length : kept >= Math.ceil(0.8 * q.length);
+}

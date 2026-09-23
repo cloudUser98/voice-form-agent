@@ -106,7 +106,14 @@ the key and everything else stay out of the model. A prefilled value may be
 `readOnly` (refused, `beforeUpdate` says why) or `confirmOnly`: `#gate` takes it out
 of the patch on both write paths (`save_fields` and a tool's `fields`) and parks a
 proposal; `#proposalBeat` forces the explanation and question; only `confirm_change`
-writes it (`#settle`); `submit_form` refuses while one is open. `previous` and
+writes it (`#settle`); `submit_form` refuses while one is open.
+A yes has to have been **said**: `confirm_change` with `accept:true` must carry a
+`quote` found (`grounded()` in `src/user.js`: accents/case/punctuation ignored,
+≤1 word in 5 missing) in what the visitor said *after* the proposal was parked —
+transcriptions in audio mode, `sendText` in text mode. Otherwise nothing is
+written, the model is shown what was actually said, and the question is forced
+again. `confirmedWith` records the transcript, not the model's paraphrase. A
+session that has received no words at all (hand-driven tests) is not checked. `previous` and
 `confirmed` go to evidence only — never the board. `done` and `submit(data, {key})`
 carry `key`. Staff `correct()` bypasses all of it.
 

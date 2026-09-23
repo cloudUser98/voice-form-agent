@@ -5,7 +5,7 @@ import { FormState } from './form-state.js';
 import { modeOf, withTimeout } from './tools.js';
 import { openTrace } from './trace.js';
 import { resolveLanguage, languageBlock, transcriptionConfig, DEFAULT_LOCALE } from './language.js';
-import { userSchemaProblems, arrival, explanation, sameValue } from './user.js';
+import { userSchemaProblems, arrival, explanation, sameValue, grounded } from './user.js';
 import { checkField, isEmpty } from './validate.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -86,6 +86,11 @@ export class FormAgent extends EventEmitter {
         this.spokenBytes = 0;               // audio streamed for the current response
         this.spokenAt = 0;                  // when its first chunk went out
         this.pending = new Map();           // client requests waiting to be answered
+        // Everything the visitor said, in the order they said it: {itemId, text}.
+        // `text` is null until the transcription lands — see #heardSince.
+        this.heard = [];
+        this.hearing = new Set();           // who is waiting for a transcription
+        this.hearingBudgetMs = 3000;        // how long to wait for one (measured max 2.7s)
         this.nextRequest = 1;
         this.opts = { apiKey, model, voice, transcriptionModel };
         this.trace = openTrace(sessionId, { form: form.name, notes, mode });
@@ -129,6 +134,7 @@ export class FormAgent extends EventEmitter {
 
   /** Typed input — same conversation, no microphone. Makes the agent testable. */
   sendText(text) {
+      this.#heard(null, text);
       this.#send({
           type: 'conversation.item.create',
           item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
@@ -151,6 +157,7 @@ export class FormAgent extends EventEmitter {
     if (!outcome.ok) return outcome;
     // Staff overrule; a change the visitor was about to be asked about is moot.
     reg.proposals.delete(field);
+    reg.askedSince.delete(field);
 
     const cleared = reg.state.data[field] === undefined;
     const who = this.#labelOf(reg) || reg.id;
@@ -431,6 +438,47 @@ export class FormAgent extends EventEmitter {
   }
 
   /**
+   * Words from the visitor. Typed ones arrive whole; spoken ones fill in the turn
+   * that `input_audio_buffer.committed` already placed. A transcription for a
+   * turn nobody saw committed — the API has been seen to name the wrong item
+   * after a response.cancel — is kept rather than lost.
+   */
+  #heard(itemId, text) {
+    const turn = itemId ? this.heard.find((h) => h.itemId === itemId && h.text === null) : null;
+    if (turn) turn.text = text;
+    else this.heard.push({ itemId, text });
+    for (const wake of this.hearing) wake();
+  }
+
+  /**
+   * Can the engine hear the visitor at all? With a microphone, always: input is
+   * transcribed in every audio session. Typed, once sendText has carried
+   * something. A session that has received neither is being driven by hand — a
+   * test or a replay — and there is nothing to hold a quote against.
+   */
+  #listening() {
+    return this.mode === 'audio' || this.heard.length > 0;
+  }
+
+  /**
+   * What the visitor said from turn `since` on, once the words are in. A
+   * transcription can land after the tool call that answers it, so a turn still
+   * being transcribed is waited for — briefly, because the visitor is standing
+   * there in silence meanwhile. One that never arrives counts as nothing said.
+   */
+  async #heardSince(since) {
+    const deadline = Date.now() + this.hearingBudgetMs;
+    while (this.heard.slice(since).some((h) => h.text === null) && Date.now() < deadline) {
+      await new Promise((resolve) => {
+        const wake = () => { clearTimeout(timer); this.hearing.delete(wake); resolve(); };
+        const timer = setTimeout(wake, deadline - Date.now());
+        this.hearing.add(wake);
+      });
+    }
+    return this.heard.slice(since).map((h) => h.text).filter(Boolean);
+  }
+
+  /**
    * @typedef {Object} Registration
    * @property {FormState} state - State of the form for the registration.
    */
@@ -455,6 +503,9 @@ export class FormAgent extends EventEmitter {
           // changes to them that are waiting for a yes. See src/user.js.
           protect,                          // field -> { readOnly, confirmOnly, beforeUpdate, value }
           proposals: new Map(),             // field -> { from, to, quote, asked }
+          // Where in `heard` each proposal's answers start, and whether it has
+          // already been asked once without getting a yes.
+          askedSince: new Map(),            // field -> { since, again }
           beatHeld: false,                  // completed while a change was pending
           attachments: new Map(),           // field -> the bytes its token stands for
           // A question that is asked once and may be turned down. Seeded only
@@ -651,13 +702,22 @@ export class FormAgent extends EventEmitter {
    */
   #proposalBeat(reg) {
     const who = this.#labelOf(reg) || 'The visitor';
-    const lines = [...reg.proposals]
-      .filter(([, p]) => !p.asked)
-      .map(([field, p]) => {
+    const asking = [...reg.proposals].filter(([, p]) => !p.asked);
+    const again = asking.every(([field]) => reg.askedSince.get(field)?.again);
+    const lines = asking.map(([field, p]) => {
         p.asked = true;
         return `- ${field}: from ${JSON.stringify(p.from)} to ${JSON.stringify(p.to)}. `
           + `What changing it means: ${explanation(reg.protect[field])}`;
       });
+    // Asked already, and nothing they said since was a yes. The explanation was
+    // given; what is missing is the answer.
+    if (again) {
+      return this.#beat(
+        `${who} (${reg.id}) has NOT answered whether they want this change to their registered profile, `
+        + `so NOTHING has been changed.\n${lines.join('\n')}\n\n`
+        + 'If they asked you something, answer it in ONE short sentence. Then ask them again, briefly, '
+        + 'whether they want the change — do not repeat the whole explanation. Do not say it is done.');
+    }
     return this.#beat(
       `${who} (${reg.id}) asked to change something that comes from their registered profile. `
       + `NOTHING has been changed yet.\n${lines.join('\n')}\n\n`
@@ -915,6 +975,10 @@ export class FormAgent extends EventEmitter {
 
       const quote = typeof quotes[field] === 'string' && quotes[field].trim() ? quotes[field].trim() : null;
       reg.proposals.set(field, { from: current, to: next, quote, asked: false });
+      // Anything the visitor says from here on is an answer to it. The sentence
+      // that asked for the change was committed before this response began, so
+      // it is already behind this mark even if its transcription lands later.
+      reg.askedSince.set(field, { since: this.heard.length, again: false });
       proposed.push(field);
       this.trace.write({ dir: 'tool', type: 'change.proposed', registration: reg.id, field, from: current, to: next });
     }
@@ -934,6 +998,7 @@ export class FormAgent extends EventEmitter {
   async #settle(reg, field, accept, quote) {
     const proposal = reg.proposals.get(field);
     reg.proposals.delete(field);
+    reg.askedSince.delete(field);
     this.trace.write({ dir: 'tool', type: 'change.answered', registration: reg.id, field, accept });
     if (!accept) return { changed: [], problems: [] };
 
@@ -1147,8 +1212,19 @@ export class FormAgent extends EventEmitter {
                if (e.error?.code === 'response_cancel_not_active') return;
                return this.emit('error', new Error(e.error?.message || 'realtime error'));
 
+           case 'input_audio_buffer.committed':
+               // A turn exists from this moment, in this order, whatever time its
+               // words arrive. Transcription is asynchronous to the response it
+               // triggered and often lands after it.
+               this.heard.push({ itemId: e.item_id ?? null, text: null });
+               return;
+
            case 'conversation.item.input_audio_transcription.completed':
+               this.#heard(e.item_id, e.transcript || '');
                return this.emit('transcript', { role: 'user', text: e.transcript });
+
+           case 'conversation.item.input_audio_transcription.failed':
+               return void this.#heard(e.item_id, '');
 
            case 'response.created': {
                const r = this.#started(e.response);
@@ -1454,7 +1530,32 @@ export class FormAgent extends EventEmitter {
                };
            }
            const accept = args.accept === true;
-           const { changed, problems } = await this.#settle(reg, field, accept, args.quote);
+           let quote = args.quote;
+           // A yes is the one answer that unlocks a write, so it has to have been
+           // said. The quote is looked for in what the visitor actually said since
+           // the change was put to them; a quote nobody said is a yes nobody gave.
+           // A no needs nothing: keeping the profile's value is the safe default.
+           if (accept && this.#listening()) {
+               const answers = await this.#heardSince(reg.askedSince.get(field)?.since ?? 0);
+               const said = answers.find((a) => grounded(args.quote, a));
+               if (!said) {
+                   reg.proposals.get(field).asked = false;       // ask again, forced
+                   reg.askedSince.get(field).again = true;
+                   this.trace.write({ dir: 'tool', type: 'change.unheard', registration: reg.id, field, quote: args.quote ?? null, answers });
+                   return {
+                       ok: false,
+                       registration: reg.id,
+                       field,
+                       error: answers.length
+                           ? 'nothing they said since you asked contains those words — they have not said yes'
+                           : 'they have not answered since you asked',
+                       heard: answers,
+                       pending_confirmation: [...reg.proposals.keys()],
+                   };
+               }
+               quote = said;                                   // what was said, not how it was reported
+           }
+           const { changed, problems } = await this.#settle(reg, field, accept, quote);
            this.#publish(reg);
            return {
                ok: true,

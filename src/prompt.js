@@ -131,7 +131,8 @@ function proposalLine(status, proposals) {
   const changes = proposals.map((p) => `${p.field} ${JSON.stringify(p.from)} → ${JSON.stringify(p.to)}`);
   return `\n   awaiting their confirmation to change: ${changes.join(', ')}`
        + '\n   → nothing is changed yet. Call confirm_change with accept true only if they clearly say yes, '
-       + 'false if they say no or want to keep it.';
+       + 'false if they say no or want to keep it, and put their exact words in quote. '
+       + 'If they have not answered, ask again instead of calling it.';
 }
 
 /**
@@ -350,9 +351,9 @@ export function buildTools(form, capabilities = null) {
                 registration: { type: 'string', description: 'Whose change this is, e.g. "r1".' },
                 field: { type: 'string', description: 'The field, exactly as the status block spells it.' },
                 accept: { type: 'boolean', description: 'true only if they clearly said yes; false if they said no or want to keep it.' },
-                quote: { type: 'string', description: 'The words they answered with.' },
+                quote: { type: 'string', description: 'Their exact words, from the answer they gave AFTER you asked. A yes is checked against what they actually said.' },
             },
-            required: ['registration', 'field', 'accept'],
+            required: ['registration', 'field', 'accept', 'quote'],
         },
     };
 

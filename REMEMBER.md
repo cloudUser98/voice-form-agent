@@ -92,3 +92,22 @@ tu código" after it was read. Two things fix it, and neither is a bigger
   waiting, `response.cancel {response_id}` if sent but silent, its items deleted.
   Once audio has started it plays out. `response_cancel_not_active` is expected
   noise from that race and is swallowed.
+
+## A visitor's words arrive after the answer to them
+
+Input transcription is a separate ASR pass, asynchronous to the response it
+triggered: `committed` → `transcription.completed` is 0.6 s at p50, 2.7 s max in
+the kiosk traces, and the model can call a tool before it lands. Anything that
+checks what the visitor said must order turns by `input_audio_buffer.committed`
+and wait (bounded) for the text — never by when the transcript happened to
+arrive. See `#heard` / `#heardSince`. The API has also been seen to name the
+wrong `item_id` on a transcription after a `response.cancel`; a transcript for
+an unknown item is kept, not dropped.
+
+## confirmOnly was only as strong as the model's honesty
+
+In 2 of 2 kiosk runs where the visitor ignored the question, the model called
+`confirm_change accept:true` with a quote nobody said — a paraphrase of the
+request that caused the proposal. Prompt wording already said "only if they
+clearly say yes". The fix is the engine checking the quote against transcripts
+after the question (`grounded`), not more prompt.
